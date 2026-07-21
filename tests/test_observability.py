@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -112,6 +113,56 @@ def test_unwritable_output_directory_returns_none_and_does_not_raise(
             result = FireRecorder(target).record(_event(), _frame(), _observation())
     finally:
         target.chmod(0o700)  # restore so tmp_path cleanup can remove it
+
+    assert result is None
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+
+def test_sidecar_write_failure_removes_the_orphaned_png(tmp_path, monkeypatch, caplog):
+    """Finding 2: if the PNG write succeeds but the sidecar write then fails
+    (e.g. disk fills between the two), the PNG must not be left behind with
+    no metadata to explain it — evidence must stay all-or-nothing."""
+    real_write_text = Path.write_text
+
+    def boom(self, *args, **kwargs):
+        if self.suffix == ".json":
+            raise OSError("disk full")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", boom)
+
+    with caplog.at_level("ERROR"):
+        result = FireRecorder(tmp_path).record(_event(), _frame(), _observation())
+
+    assert result is None
+    assert list(tmp_path.iterdir()) == [], (
+        "the PNG must be removed when its sidecar fails to write, "
+        "so no orphaned evidence file is left with no metadata"
+    )
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+
+def test_sidecar_write_failure_and_unremovable_png_still_does_not_raise(
+    tmp_path, monkeypatch, caplog
+):
+    """The cleanup itself must be contained: if even removing the orphaned
+    PNG fails, record() must still return None instead of raising into the
+    event path."""
+    real_write_text = Path.write_text
+
+    def boom_write_text(self, *args, **kwargs):
+        if self.suffix == ".json":
+            raise OSError("disk full")
+        return real_write_text(self, *args, **kwargs)
+
+    def boom_unlink(self, *args, **kwargs):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "write_text", boom_write_text)
+    monkeypatch.setattr(Path, "unlink", boom_unlink)
+
+    with caplog.at_level("ERROR"):
+        result = FireRecorder(tmp_path).record(_event(), _frame(), _observation())
 
     assert result is None
     assert any(record.levelname == "ERROR" for record in caplog.records)

@@ -57,7 +57,24 @@ class FireRecorder:
                 "details": dict(observation.details),
                 "debug": dict(observation.debug),
             }
-            png_path.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
+            try:
+                png_path.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
+            except OSError:
+                log.error(
+                    "failed to write fire evidence sidecar for %s; removing the "
+                    "orphaned PNG so evidence stays all-or-nothing",
+                    png_path,
+                    exc_info=True,
+                )
+                try:
+                    png_path.unlink()
+                except OSError:
+                    log.error(
+                        "failed to remove orphaned fire evidence PNG %s",
+                        png_path,
+                        exc_info=True,
+                    )
+                return None
         except OSError:
             log.error(
                 "failed to record fire evidence in %s", self._dir, exc_info=True
