@@ -174,42 +174,58 @@ async def _pump(
     loop = asyncio.get_running_loop()
     frames = source.frames()
     last_signature = None
-    while True:
-        # `next` raising StopIteration inside the executor would surface here
-        # as a RuntimeError (PEP 479: asyncio refuses to propagate a bare
-        # StopIteration out of a Future), so exhaustion is signalled with a
-        # sentinel default instead of relying on the exception.
-        frame = await loop.run_in_executor(None, next, frames, _FRAMES_EXHAUSTED)
-        if frame is _FRAMES_EXHAUSTED:
-            log.warning("frame source exhausted; pump stopping")
-            return
+    try:
+        while True:
+            # `next` raising StopIteration inside the executor would surface
+            # here as a RuntimeError (PEP 479: asyncio refuses to propagate a
+            # bare StopIteration out of a Future), so exhaustion is signalled
+            # with a sentinel default instead of relying on the exception.
+            frame = await loop.run_in_executor(None, next, frames, _FRAMES_EXHAUSTED)
+            if frame is _FRAMES_EXHAUSTED:
+                log.warning("frame source exhausted; pump stopping")
+                return
 
-        try:
-            active = get_detector(confirmer.game)
-            observation = active.observe(frame)
-            event = confirmer.observe(observation, frame.captured_at)
-            if event is not None:
-                recorder.record(event, frame, observation)
-                await server.broadcast(event)
+            try:
+                active = get_detector(confirmer.game)
+                observation = active.observe(frame)
+                event = confirmer.observe(observation, frame.captured_at)
+                if event is not None:
+                    recorder.record(event, frame, observation)
+                    await server.broadcast(event)
 
-            # Status on every state change, so the dashboard can distinguish
-            # "idle" from "holding in cooldown until character select". Also
-            # fires on a bare game change (e.g. an IDLE-to-IDLE set_game),
-            # which otherwise leaves the dashboard showing the stale game.
-            signature = (
-                confirmer.state,
-                confirmer.armed,
-                source.connected,
-                confirmer.game,
-            )
-            if signature != last_signature:
-                last_signature = signature
-                await server.broadcast(server.status_event(frame.captured_at))
-        except Exception:
-            log.exception(
-                "pump iteration failed at %s; event server stays up",
-                frame.captured_at,
-            )
+                # Status on every state change, so the dashboard can
+                # distinguish "idle" from "holding in cooldown until
+                # character select". Also fires on a bare game change (e.g.
+                # an IDLE-to-IDLE set_game), which otherwise leaves the
+                # dashboard showing the stale game.
+                signature = (
+                    confirmer.state,
+                    confirmer.armed,
+                    source.connected,
+                    confirmer.game,
+                )
+                if signature != last_signature:
+                    last_signature = signature
+                    await server.broadcast(server.status_event(frame.captured_at))
+            except Exception:
+                log.exception(
+                    "pump iteration failed at %s; event server stays up",
+                    frame.captured_at,
+                )
+    finally:
+        # Task cancellation (Ctrl-C) delivers CancelledError here — including
+        # while the `run_in_executor` above is still in flight, since the
+        # asyncio-level future it awaits is marked cancelled immediately even
+        # though the underlying thread can't be interrupted mid-call. This
+        # `finally` therefore runs during asyncio.run()'s cancel-all-tasks
+        # phase, *before* it calls `shutdown_default_executor()`. Signalling
+        # the stop here — instead of only in `_cmd_run`'s outer
+        # `finally: source.close()`, which doesn't run until after
+        # `asyncio.run()` returns — is what lets the background frame thread
+        # (blocked in a `next()` call that loops on backoff sleeps) notice
+        # `_stopped` and exit in bounded time, so
+        # `shutdown_default_executor()` doesn't wait forever.
+        source.stop()
 
 
 def _cmd_run(args: argparse.Namespace) -> int:

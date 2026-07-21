@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -72,6 +74,9 @@ class FakeSource:
     def frames(self):
         return self._frame_factory()
 
+    def stop(self) -> None:
+        pass
+
 
 @dataclass
 class StatusSnapshot:
@@ -136,3 +141,100 @@ def test_pump_contains_a_per_frame_exception_and_keeps_pumping(caplog):
 
     assert pulled == [0, 1], "both frames must have been pulled despite the failure on each"
     assert caplog.text.count("pump iteration failed") == 2
+
+
+# --- _pump: shutdown-ordering (Finding 1) ---
+#
+# `_pump` reads frames via `loop.run_in_executor(None, next, frames, ...)`.
+# When OBS is down, `next()` blocks *inside that executor thread*, looping on
+# backoff sleeps with no `yield` in between — a single call can run for a
+# long time. `asyncio.run()`'s internal shutdown sequence is:
+#   cancel all tasks -> shutdown_asyncgens() -> shutdown_default_executor()
+# and that last step blocks waiting for any in-flight executor call to
+# finish. If nothing tells the blocked frame loop to stop *before* that wait
+# begins, `asyncio.run()` hangs until the frame source gives up on its own
+# (which, against real OBS, it may never do).
+#
+# `BlockingFrameSource.frames()` mimics that shape: it loops on tiny sleeps,
+# checking `_stopped`, and never yields a frame — so `next()` on it blocks
+# in the executor thread exactly like the real generator does when OBS is
+# unreachable.
+
+
+class BlockingFrameSource:
+    """A FrameSource stand-in whose frames() blocks in the executor thread
+    until stop() is called, without ever producing a frame. Simulates OBS
+    being unreachable: the target scenario for the Ctrl-C hang."""
+
+    def __init__(self) -> None:
+        self.connected = False
+        self._stopped = False
+        self.entered_loop = threading.Event()
+
+    def stop(self) -> None:
+        self._stopped = True
+
+    def frames(self):
+        while not self._stopped:
+            self.entered_loop.set()
+            time.sleep(0.01)
+        return
+        yield  # pragma: no cover - unreachable; makes this a generator function
+
+
+def test_cancelling_the_pump_lets_asyncio_run_shut_down_promptly():
+    """Finding 1: reproduces asyncio.run()'s real internal shutdown ordering
+    (cancel tasks, then shutdown_default_executor()) against a source that
+    never stops on its own. If the pump does not signal source.stop() from
+    inside the async context (e.g. before it returns/raises on
+    cancellation), the still-running executor thread keeps the frame loop
+    alive forever and asyncio.run() never returns — shutdown_default_executor
+    would wait for a thread that will never finish.
+
+    Run in a background thread with a bounded join so a regression fails
+    the test instead of hanging the suite."""
+    confirmer = Confirmer(Game.SF6, ConfirmerConfig())
+    source = BlockingFrameSource()
+    server = RecordingServer(confirmer)
+
+    async def main_async() -> None:
+        task = asyncio.create_task(_pump(source, confirmer, server, recorder=None))
+        loop = asyncio.get_running_loop()
+        # Wait until the frame loop has actually started running in its
+        # executor thread, so the cancellation below lands mid-block —
+        # exactly the moment a Ctrl-C during OBS-down retry would land.
+        entered = await loop.run_in_executor(None, source.entered_loop.wait, 2)
+        assert entered, "background frame loop never started"
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    result: dict[str, float | BaseException | None] = {"duration": None, "error": None}
+
+    def run_it() -> None:
+        start = time.monotonic()
+        try:
+            asyncio.run(main_async())
+        except BaseException as exc:  # noqa: BLE001 - surfaced to the main thread below
+            result["error"] = exc
+        finally:
+            result["duration"] = time.monotonic() - start
+
+    runner = threading.Thread(target=run_it, daemon=True)
+    runner.start()
+    # asyncio.run()'s shutdown_default_executor() has no timeout of its own;
+    # a generous bound distinguishes "shut down promptly" from "hung" without
+    # making the test flaky.
+    runner.join(timeout=5)
+
+    assert not runner.is_alive(), (
+        "asyncio.run(main_async()) did not return within 5s: the frame "
+        "source was never told to stop before shutdown_default_executor() "
+        "started waiting on its (still-running) executor thread"
+    )
+    if result["error"] is not None:
+        raise result["error"]
+    assert source._stopped is True
+    assert result["duration"] < 2.0
