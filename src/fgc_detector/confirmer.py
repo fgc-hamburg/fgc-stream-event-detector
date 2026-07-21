@@ -109,6 +109,7 @@ class Confirmer:
         if observation.screen is Screen.IN_MATCH:
             self._state = ConfirmerState.LIVE
             self._streak.clear()
+            self._streak_last_ts = None
         return None
 
     def _observe_live(
@@ -121,6 +122,7 @@ class Confirmer:
 
         if observation.screen is Screen.IN_MATCH:
             self._streak.clear()
+            self._streak_last_ts = None
             return None
 
         if observation.screen is not Screen.MATCH_END or observation.winner is None:

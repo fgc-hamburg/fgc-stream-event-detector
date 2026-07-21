@@ -258,9 +258,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     recorder = FireRecorder(Path("evidence"))
 
-    ui_server, _ui_thread = serve_ui(
-        config.server.host, config.server.ui_port, config.server.port
-    )
+    try:
+        ui_server, _ui_thread = serve_ui(
+            config.server.host, config.server.ui_port, config.server.port
+        )
+    except Exception:
+        # serve_ui most plausibly fails because ui_port is already bound;
+        # source must still be released on that path, same as every other
+        # failure after it was constructed.
+        source.close()
+        raise
 
     async def main_async() -> None:
         await asyncio.gather(server.serve(), _pump(source, confirmer, server, recorder))
