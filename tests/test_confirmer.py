@@ -120,13 +120,47 @@ def test_post_match_replay_does_not_fire_a_phantom_second_event(driver):
     After a set, SF6 and Tekken show a replay: real gameplay, real HUD, and a
     real KO at the end of it. A detector without cooldown reports that replayed
     KO as a second game.
+
+    The replay is of the *decisive* (final) round of the set, so a real
+    detector's round-counter fields read the end-of-game state -- e.g. 2-1,
+    not 0-0. This must not be confused with the start of a fresh game, so it
+    must not release cooldown either. If this test only passed because the
+    replay frames omitted round details entirely, it would be worthless: real
+    detectors (e.g. MarkerRoundDetector) publish round counters on every
+    IN_MATCH observation, including during a replay.
     """
     driver.feed(_in_match(), 10).feed(_match_end(Side.P1), 3)
     assert len(driver.events) == 1
 
     driver.advance(10)  # replay begins
-    driver.feed(_in_match(), 30).feed(_match_end(Side.P1), 10)
+    driver.feed(_in_match_rounds("2", "1"), 30).feed(_match_end(Side.P1), 10)
     assert len(driver.events) == 1, "replayed KO must not fire a second event"
+
+
+def test_a_replay_starting_from_round_one_does_release_cooldown_known_limitation(driver):
+    """Known, accepted limitation: a replay of round 1 reads as a fresh game.
+
+    Round counters read 0-0 at the start of round 1, and the cooldown's 0-0
+    exit cannot distinguish "round 1 is genuinely starting" from "we are
+    replaying a set's very first round, which also displayed 0-0". If a
+    replay happens to show round 1 (rather than the more typical final-round
+    replay), cooldown releases early and a replayed KO could fire as a
+    phantom second event.
+
+    This trade-off is deliberate, not a bug: without the 0-0 exit, the
+    detector wedges through every rematch that skips CHAR_SELECT and misses
+    game 2 of the set entirely -- a far more damaging and far more common
+    failure than the rare case of a round-1 replay. This test documents that
+    reality so nobody "fixes" it by accident; it is not asserting desired
+    behavior.
+    """
+    driver.feed(_in_match(), 10).feed(_match_end(Side.P1), 3)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+    driver.feed(_in_match_rounds("0", "0"), 3)  # replay happens to show round 1
+    assert driver.confirmer.state is ConfirmerState.IDLE, (
+        "documented limitation: a round-1 replay releases cooldown"
+    )
 
 
 def test_char_select_ends_cooldown_and_the_next_match_can_fire(driver):

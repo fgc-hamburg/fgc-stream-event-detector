@@ -176,13 +176,22 @@ class Confirmer:
 
         Deliberately does not exit on elapsed time alone: the post-match replay
         shows real gameplay and a real KO, so a time-based exit would re-arm
-        mid-replay and fire on the replayed KO. Two signals unambiguously mean
-        "the previous game is over": CHAR_SELECT, and round counters reading
-        0-0 for `agreement_frames` consecutive IN_MATCH observations (players
-        routinely rematch without ever passing through character select, so
-        CHAR_SELECT alone would wedge the detector until the safety valve).
-        The safety valve below prevents a missed signal from wedging the
-        detector forever.
+        mid-replay and fire on the replayed KO. Two signals are treated as
+        meaning "the previous game is over": CHAR_SELECT, and round counters
+        reading 0-0 for `agreement_frames` consecutive IN_MATCH observations
+        (players routinely rematch without ever passing through character
+        select, so CHAR_SELECT alone would wedge the detector until the
+        safety valve).
+
+        The 0-0 exit is a deliberate trade-off, not a fully safe signal: it
+        defends against a replay of a *decisive* round, whose round counters
+        read the end-of-game state (e.g. 2-1), not 0-0. A replay that happens
+        to show round 1 of the set also reads 0-0 and will release cooldown,
+        which can let a replayed KO fire as a phantom event. This is accepted
+        because the alternative -- not releasing on 0-0 -- misses game 2 of
+        every set whose rematch skips character select, which is the more
+        damaging and more common failure. The safety valve below prevents a
+        missed signal from wedging the detector forever.
         """
         if observation.screen is Screen.CHAR_SELECT:
             self._reset()
