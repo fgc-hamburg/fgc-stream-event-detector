@@ -136,16 +136,18 @@ def test_video_source_naive_start_time_raises():
         VideoFrameSource(Path("unused.mp4"), CANONICAL, start_time=datetime(2026, 1, 1))
 
 
-def test_video_source_bogus_fps_falls_back_to_default_with_warning(tmp_path, caplog):
+def test_video_source_bogus_fps_falls_back_to_default_with_warning(tmp_path, caplog, monkeypatch):
     path = tmp_path / "clip.mp4"
-    _write_video(path, fps=30.0, count=2)
+    # Write video at 24.0 fps (differs from _DEFAULT_FPS of 30.0)
+    # to ensure the timestamp assertion proves the fallback executed
+    _write_video(path, fps=24.0, count=2)
 
     source = VideoFrameSource(path, CANONICAL)
-    real_capture_cls = cv2.VideoCapture
+    original_video_capture = cv2.VideoCapture
 
     class StubCapture:
         def __init__(self, filename):
-            self._inner = real_capture_cls(filename)
+            self._inner = original_video_capture(filename)
 
         def isOpened(self):
             return self._inner.isOpened()
@@ -161,14 +163,11 @@ def test_video_source_bogus_fps_falls_back_to_default_with_warning(tmp_path, cap
         def release(self):
             return self._inner.release()
 
-    original_video_capture = cv2.VideoCapture
-    cv2.VideoCapture = lambda filename: StubCapture(filename)
-    try:
-        with caplog.at_level("WARNING"):
-            frames = list(source.frames())
-    finally:
-        cv2.VideoCapture = original_video_capture
+    monkeypatch.setattr(cv2, "VideoCapture", lambda filename: StubCapture(filename))
+    with caplog.at_level("WARNING"):
+        frames = list(source.frames())
 
     assert len(frames) == 2
+    # Assert timestamp delta is 1/30 (the fallback), which cannot come from 1/24 video fps
     assert frames[1].captured_at - frames[0].captured_at == timedelta(seconds=1.0 / 30.0)
     assert "invalid fps" in caplog.text
