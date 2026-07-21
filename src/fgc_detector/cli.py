@@ -25,6 +25,7 @@ from .observability import FireRecorder
 from .pipeline import run_offline
 from .server import EventServer
 from .types import Game, RuntimeSettings
+from .ui.http import serve_ui
 
 log = logging.getLogger(__name__)
 
@@ -257,6 +258,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     recorder = FireRecorder(Path("evidence"))
 
+    ui_server, _ui_thread = serve_ui(
+        config.server.host, config.server.ui_port, config.server.port
+    )
+
     async def main_async() -> None:
         await asyncio.gather(server.serve(), _pump(source, confirmer, server, recorder))
 
@@ -270,6 +275,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # the loop instead of letting _ensure_client() rebuild forever) and
         # releases the OBS client.
         source.close()
+        # ThreadingHTTPServer.shutdown() only signals serve_forever()'s poll
+        # loop to stop and blocks until it notices — it does not wait on
+        # in-flight request threads, so it cannot reintroduce the Ctrl-C hang
+        # `_pump`'s cancellation ordering (see its docstring) was written to
+        # avoid.
+        ui_server.shutdown()
     return 0
 
 

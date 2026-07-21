@@ -166,6 +166,23 @@ def test_save_config_round_trips(tmp_path):
     assert reloaded.obs.source_name == "Game Capture", "unrelated settings preserved"
 
 
+def test_ui_port_survives_save_config_round_trip(tmp_path):
+    """Guards against a field added to ServerConfig, load_config, and
+    config.example.toml but forgotten in save_config's document dict (or vice
+    versa) — this project has already shipped that exact bug once. If
+    save_config's `server` table drops `ui_port`, the reload below falls back
+    to the dataclass default (6601) instead of the non-default value set
+    here, and this assertion fails.
+    """
+    from dataclasses import replace
+
+    path = _write(tmp_path, VALID)
+    config = load_config(path)
+    updated = replace(config, server=replace(config.server, ui_port=9999))
+    save_config(path, updated)
+    assert load_config(path).server.ui_port == 9999
+
+
 def test_save_config_escapes_awkward_strings(tmp_path):
     # Built via dataclasses.replace rather than interpolated into raw TOML
     # text: a naive f-string writer would produce invalid TOML for a value

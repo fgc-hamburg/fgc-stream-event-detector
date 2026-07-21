@@ -111,6 +111,7 @@ def test_example_config_loads_cleanly_with_documented_defaults():
     assert config.obs.poll_hz == 5.0
     assert config.server.host == "127.0.0.1"
     assert config.server.port == 6600
+    assert config.server.ui_port == 6601
     assert config.confirmer.agreement_frames == 3
     assert config.confirmer.cooldown_max_seconds == 180.0
     assert config.confirmer.streak_staleness_seconds == 3.0

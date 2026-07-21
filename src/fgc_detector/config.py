@@ -30,6 +30,7 @@ class ObsConfig:
 class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 6600
+    ui_port: int = 6601
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,7 @@ def load_config(path: Path) -> AppConfig:
         server = ServerConfig(
             host=server_section.get("host", "127.0.0.1"),
             port=int(server_section.get("port", 6600)),
+            ui_port=int(server_section.get("ui_port", 6601)),
         )
         confirmer = ConfirmerConfig(
             agreement_frames=int(confirmer_section.get("agreement_frames", 3)),
@@ -143,7 +145,11 @@ def save_config(path: Path, config: AppConfig) -> None:
             "password": config.obs.password,
             "poll_hz": config.obs.poll_hz,
         },
-        "server": {"host": config.server.host, "port": config.server.port},
+        "server": {
+            "host": config.server.host,
+            "port": config.server.port,
+            "ui_port": config.server.ui_port,
+        },
         "confirmer": {
             "agreement_frames": config.confirmer.agreement_frames,
             "cooldown_max_seconds": config.confirmer.cooldown_max_seconds,

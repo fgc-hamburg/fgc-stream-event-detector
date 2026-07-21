@@ -17,6 +17,8 @@ poll_hz = 5.0
 [server]
 host = "127.0.0.1"
 port = 6600
+# The config page. Open http://127.0.0.1:6601 in a browser.
+ui_port = 6601
 
 [confirmer]
 # Consecutive agreeing frames required before an event fires.

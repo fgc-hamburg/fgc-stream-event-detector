@@ -1,0 +1,137 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>FGC Stream Event Detector</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; }
+  fieldset { border: 1px solid #8884; border-radius: 6px; margin: 0 0 1rem; }
+  legend { padding: 0 .4rem; font-weight: 600; }
+  label { display: block; padding: .15rem 0; }
+  .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+  .pill { border-radius: 999px; padding: .1rem .6rem; font-size: .85rem; background: #8883; }
+  .on { background: #2a7; color: #fff; }
+  .off { background: #a33; color: #fff; }
+  button { font: inherit; padding: .3rem .9rem; border-radius: 6px; }
+  #error { color: #c33; min-height: 1.5em; }
+  .hint { color: #8889; font-size: .85rem; margin: .2rem 0 0; }
+</style>
+
+<h1>FGC Stream Event Detector</h1>
+
+<fieldset>
+  <legend>Status</legend>
+  <div class="row">
+    <span id="link" class="pill">connecting…</span>
+    <span id="obs" class="pill">OBS ?</span>
+    <span id="armed" class="pill">?</span>
+    <span id="state" class="pill">?</span>
+  </div>
+  <p class="row" style="margin-top:.8rem">
+    <button id="arm">Arm</button>
+    <button id="disarm">Disarm</button>
+  </p>
+  <p class="hint">Cooldown means a match was just detected; the detector holds until it sees character select.</p>
+</fieldset>
+
+<fieldset>
+  <legend>Active game</legend>
+  <div id="active"></div>
+  <p class="hint">Only one game is on screen at a time, so only one can be active.</p>
+</fieldset>
+
+<fieldset>
+  <legend>Enabled games</legend>
+  <div id="enabled"></div>
+  <p class="hint">The roster offered above. The active game cannot be disabled.</p>
+</fieldset>
+
+<fieldset>
+  <legend>Events to fire</legend>
+  <div id="events"></div>
+  <p class="hint">Status and config messages are always delivered.</p>
+</fieldset>
+
+<p id="error"></p>
+
+<script>
+const WS_PORT = "__WS_PORT__";
+const socket = new WebSocket(`ws://${location.hostname}:${WS_PORT}`);
+const $ = (id) => document.getElementById(id);
+let config = null;
+
+const pill = (el, text, on) => {
+  el.textContent = text;
+  el.className = "pill " + (on === null ? "" : on ? "on" : "off");
+};
+
+const send = (payload) => {
+  $("error").textContent = "";
+  socket.send(JSON.stringify(payload));
+};
+
+socket.onopen = () => pill($("link"), "connected", true);
+socket.onclose = () => pill($("link"), "disconnected", false);
+
+socket.onmessage = (message) => {
+  const data = JSON.parse(message.data);
+  if (data.error) { $("error").textContent = data.error; return; }
+  if (data.type === "status") {
+    pill($("obs"), data.obs_connected ? "OBS connected" : "OBS down", data.obs_connected);
+    pill($("armed"), data.armed ? "armed" : "disarmed", data.armed);
+    pill($("state"), data.state, null);
+  }
+  if (data.type === "config") { config = data; render(); }
+  if (data.type === "match_end") {
+    $("error").textContent = `detected: ${data.winner} wins (${data.confidence})`;
+  }
+};
+
+function render() {
+  $("active").innerHTML = "";
+  for (const game of config.enabled_games) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "active";
+    input.checked = game === config.active_game;
+    input.onchange = () => send({ cmd: "set_game", game });
+    label.append(input, " ", game);
+    $("active").append(label);
+  }
+
+  $("enabled").innerHTML = "";
+  for (const game of config.available_games) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = config.enabled_games.includes(game);
+    input.disabled = game === config.active_game;
+    input.onchange = () => {
+      const games = config.available_games.filter((candidate) =>
+        candidate === game ? input.checked : config.enabled_games.includes(candidate));
+      send({ cmd: "set_enabled_games", games });
+    };
+    label.append(input, " ", game);
+    $("enabled").append(label);
+  }
+
+  $("events").innerHTML = "";
+  for (const event of config.supported_events) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = config.enabled_events.includes(event);
+    input.onchange = () => {
+      const events = config.supported_events.filter((candidate) =>
+        candidate === event ? input.checked : config.enabled_events.includes(candidate));
+      send({ cmd: "set_enabled_events", events });
+    };
+    label.append(input, " ", event);
+    $("events").append(label);
+  }
+}
+
+$("arm").onclick = () => send({ cmd: "arm" });
+$("disarm").onclick = () => send({ cmd: "disarm" });
+</script>
