@@ -8,16 +8,8 @@ from fgc_detector.detectors.registry import (
 )
 from fgc_detector.types import Game, Screen
 
-
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    from fgc_detector.detectors import registry
-
-    saved = dict(registry._REGISTRY)
-    registry._REGISTRY.clear()
-    yield
-    registry._REGISTRY.clear()
-    registry._REGISTRY.update(saved)
+# Registry cleanup is provided by the autouse `clean_registry` fixture in
+# tests/conftest.py.
 
 
 def test_null_detector_always_reports_unknown():
