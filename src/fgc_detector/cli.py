@@ -28,6 +28,8 @@ from .types import Game
 
 log = logging.getLogger(__name__)
 
+_FRAMES_EXHAUSTED = object()
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fgc-detect")
@@ -82,6 +84,11 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         events = run_offline(source, detector, confirmer, recorder)
     except FileNotFoundError as exc:
         print(f"could not open video: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        # A mid-VOD decode failure (corrupt file, codec error, a detector
+        # blowing up on a bad frame) would otherwise print a raw traceback.
+        print(f"replay failed: {exc}", file=sys.stderr)
         return 2
 
     if not events:
@@ -148,6 +155,63 @@ def _cmd_capture(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _pump(
+    source: ObsFrameSource,
+    confirmer: Confirmer,
+    server: EventServer,
+    recorder: FireRecorder,
+) -> None:
+    """Drive frames from `source` into events for as long as it produces them.
+
+    A per-frame failure (most likely `UnknownGameError`, when a dashboard
+    `set_game` switches to a game with no registered detector) is logged and
+    the loop continues: a detection failure must not take the event server
+    off-air. It is not surfaced to connected clients — only logged — since
+    the dashboard has no action to take on it beyond what `status.game`
+    already tells it, and the operator watching logs is the one who can fix
+    a missing detector registration.
+    """
+    loop = asyncio.get_running_loop()
+    frames = source.frames()
+    last_signature = None
+    while True:
+        # `next` raising StopIteration inside the executor would surface here
+        # as a RuntimeError (PEP 479: asyncio refuses to propagate a bare
+        # StopIteration out of a Future), so exhaustion is signalled with a
+        # sentinel default instead of relying on the exception.
+        frame = await loop.run_in_executor(None, next, frames, _FRAMES_EXHAUSTED)
+        if frame is _FRAMES_EXHAUSTED:
+            log.warning("frame source exhausted; pump stopping")
+            return
+
+        try:
+            active = get_detector(confirmer.game)
+            observation = active.observe(frame)
+            event = confirmer.observe(observation, frame.captured_at)
+            if event is not None:
+                recorder.record(event, frame, observation)
+                await server.broadcast(event)
+
+            # Status on every state change, so the dashboard can distinguish
+            # "idle" from "holding in cooldown until character select". Also
+            # fires on a bare game change (e.g. an IDLE-to-IDLE set_game),
+            # which otherwise leaves the dashboard showing the stale game.
+            signature = (
+                confirmer.state,
+                confirmer.armed,
+                source.connected,
+                confirmer.game,
+            )
+            if signature != last_signature:
+                last_signature = signature
+                await server.broadcast(server.status_event(frame.captured_at))
+        except Exception:
+            log.exception(
+                "pump iteration failed at %s; event server stays up",
+                frame.captured_at,
+            )
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     detector = get_detector(config.game)
@@ -168,34 +232,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     recorder = FireRecorder(Path("evidence"))
 
-    async def pump() -> None:
-        loop = asyncio.get_running_loop()
-        frames = source.frames()
-        last_signature = None
-        while True:
-            frame = await loop.run_in_executor(None, next, frames)
-            active = get_detector(confirmer.game)
-            observation = active.observe(frame)
-            event = confirmer.observe(observation, frame.captured_at)
-            if event is not None:
-                recorder.record(event, frame, observation)
-                await server.broadcast(event)
-
-            # Status on every state change, so the dashboard can distinguish
-            # "idle" from "holding in cooldown until character select".
-            signature = (confirmer.state, confirmer.armed, source.connected)
-            if signature != last_signature:
-                last_signature = signature
-                await server.broadcast(server.status_event(frame.captured_at))
-
     async def main_async() -> None:
-        await asyncio.gather(server.serve(), pump())
+        await asyncio.gather(server.serve(), _pump(source, confirmer, server, recorder))
 
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:
         return 0
     finally:
+        # Signals the source's frames() loop to stop on its next check (it
+        # cannot interrupt a capture/sleep already in flight, but it ends
+        # the loop instead of letting _ensure_client() rebuild forever) and
+        # releases the OBS client.
         source.close()
     return 0
 
