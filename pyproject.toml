@@ -7,6 +7,7 @@ dependencies = [
     "opencv-python-headless>=4.10",
     "websockets>=13.0",
     "obsws-python>=1.7",
+    "tomli-w>=1.0",
 ]
 
 [project.scripts]

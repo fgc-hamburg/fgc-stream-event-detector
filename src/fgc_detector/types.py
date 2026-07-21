@@ -31,12 +31,21 @@ class Side(StrEnum):
 class EventType(StrEnum):
     MATCH_END = "match_end"
     STATUS = "status"
+    CONFIG = "config"
 
 
 class Command(StrEnum):
     ARM = "arm"
     DISARM = "disarm"
     SET_GAME = "set_game"
+    GET_CONFIG = "get_config"
+    SET_ENABLED_GAMES = "set_enabled_games"
+    SET_ENABLED_EVENTS = "set_enabled_events"
+
+
+#: Event types that carry detection results and may therefore be filtered.
+#: STATUS and CONFIG are transport bookkeeping and are always delivered.
+FILTERABLE_EVENTS: frozenset[EventType] = frozenset({EventType.MATCH_END})
 
 
 class ConfirmerState(StrEnum):
@@ -90,3 +99,34 @@ class Observation:
         agreement rule with no change to the Confirmer.
         """
         return (self.screen, self.winner, tuple(sorted(self.details.items())))
+
+
+@dataclass(frozen=True)
+class RuntimeSettings:
+    """What the operator has selected. Validated on construction.
+
+    Only one game is on screen at a time, so `enabled_games` is the roster the
+    operator picks from, not a set of concurrently running detectors.
+    """
+
+    active_game: Game
+    enabled_games: frozenset[Game]
+    enabled_events: frozenset[EventType]
+
+    def __post_init__(self) -> None:
+        if not self.enabled_games:
+            raise ValueError("enabled_games must contain at least one game")
+        if self.active_game not in self.enabled_games:
+            raise ValueError(
+                f"active game {self.active_game.value} is not in enabled_games"
+            )
+        unfilterable = self.enabled_events - FILTERABLE_EVENTS
+        if unfilterable:
+            names = ", ".join(sorted(item.value for item in unfilterable))
+            raise ValueError(f"these event types cannot be filtered: {names}")
+
+    def allows(self, event_type: EventType) -> bool:
+        """Whether an event of this type should be delivered."""
+        if event_type not in FILTERABLE_EVENTS:
+            return True
+        return event_type in self.enabled_events

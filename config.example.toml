@@ -29,3 +29,11 @@ cooldown_max_seconds = 180.0
 # scattered misreads far apart in time could still combine into a false
 # detection.
 streak_staleness_seconds = 3.0
+
+[runtime]
+# The roster of games offered in the config UI. Only one is active at a time —
+# only one game is ever on screen.
+enabled_games = ["sf6", "tekken8"]
+# Which detection events are delivered. Status and config events are always
+# delivered and cannot be disabled.
+enabled_events = ["match_end"]

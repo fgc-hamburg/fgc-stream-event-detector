@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from ..types import Frame, Game, Observation, Screen
+from ..types import EventType, Frame, Game, Observation, Screen
 from .roi import Roi
 
 
@@ -32,6 +32,10 @@ class Detector(Protocol):
         """The detector's named sampling rectangles, for the `roi` CLI preview."""
         ...
 
+    def supported_events(self) -> frozenset[EventType]:
+        """Which event types this detector can produce. Drives the config UI."""
+        ...
+
 
 _REGISTRY: dict[Game, Detector] = {}
 
@@ -49,6 +53,11 @@ def get_detector(game: Game) -> Detector:
         raise UnknownGameError(f"no detector registered for {game.value}") from exc
 
 
+def available_games() -> list[Game]:
+    """Every game with a registered detector, in stable display order."""
+    return sorted(_REGISTRY, key=lambda game: game.value)
+
+
 class NullDetector:
     """Reports UNKNOWN for every frame. Used by tests and as a safe default."""
 
@@ -62,3 +71,6 @@ class NullDetector:
 
     def rois(self) -> dict[str, Roi]:
         return {}
+
+    def supported_events(self) -> frozenset[EventType]:
+        return frozenset({EventType.MATCH_END})

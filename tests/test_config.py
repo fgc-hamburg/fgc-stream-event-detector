@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from fgc_detector.config import ConfigError, load_config
-from fgc_detector.types import Game
+from fgc_detector.types import EventType, Game
 
 EXAMPLE_CONFIG = Path(__file__).resolve().parent.parent / "config.example.toml"
 
@@ -41,6 +41,11 @@ def test_loads_a_valid_config(tmp_path):
     assert config.obs.poll_hz == 5.0
     assert config.server.port == 6600
     assert config.confirmer.agreement_frames == 3
+    # Runtime settings default to the full roster and event set when the
+    # config has no [runtime] section.
+    assert config.runtime.active_game is Game.SF6
+    assert config.runtime.enabled_games == frozenset(Game)
+    assert config.runtime.enabled_events == frozenset({EventType.MATCH_END})
 
 
 def test_missing_file_raises_config_error(tmp_path):
@@ -71,6 +76,8 @@ source_name = "Capture"
     assert config.obs.port == 4455
     assert config.server.port == 6600
     assert config.confirmer.agreement_frames == 3
+    assert config.runtime.enabled_games == frozenset(Game)
+    assert config.runtime.enabled_events == frozenset({EventType.MATCH_END})
 
 
 def test_malformed_toml_raises_config_error(tmp_path):
@@ -107,3 +114,6 @@ def test_example_config_loads_cleanly_with_documented_defaults():
     assert config.confirmer.agreement_frames == 3
     assert config.confirmer.cooldown_max_seconds == 180.0
     assert config.confirmer.streak_staleness_seconds == 3.0
+    assert config.runtime.active_game is Game.SF6
+    assert config.runtime.enabled_games == frozenset({Game.SF6, Game.TEKKEN8})
+    assert config.runtime.enabled_events == frozenset({EventType.MATCH_END})

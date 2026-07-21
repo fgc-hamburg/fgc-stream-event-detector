@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import tomli_w
+
 from .confirmer import ConfirmerConfig
-from .types import Game
+from .types import EventType, FILTERABLE_EVENTS, Game, RuntimeSettings
 
 
 class ConfigError(ValueError):
@@ -36,6 +38,10 @@ class AppConfig:
     obs: ObsConfig
     server: ServerConfig
     confirmer: ConfirmerConfig
+    runtime: RuntimeSettings
+
+    def with_runtime(self, runtime: RuntimeSettings) -> "AppConfig":
+        return replace(self, game=runtime.active_game, runtime=runtime)
 
 
 def _require_table(raw: dict[str, Any], section: str) -> dict[str, Any]:
@@ -101,4 +107,53 @@ def load_config(path: Path) -> AppConfig:
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"invalid config value: {exc}") from exc
 
-    return AppConfig(game=game, obs=obs, server=server, confirmer=confirmer)
+    runtime_section = _require_table(raw, "runtime")
+    try:
+        enabled_games = (
+            frozenset(Game(item) for item in runtime_section["enabled_games"])
+            if "enabled_games" in runtime_section
+            else frozenset(Game)
+        )
+        enabled_events = (
+            frozenset(EventType(item) for item in runtime_section["enabled_events"])
+            if "enabled_events" in runtime_section
+            else frozenset(FILTERABLE_EVENTS)
+        )
+        runtime = RuntimeSettings(
+            active_game=game,
+            enabled_games=enabled_games,
+            enabled_events=enabled_events,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"invalid [runtime] section: {exc}") from exc
+
+    return AppConfig(
+        game=game, obs=obs, server=server, confirmer=confirmer, runtime=runtime
+    )
+
+
+def save_config(path: Path, config: AppConfig) -> None:
+    """Write the whole config back to disk. The file stays hand-editable."""
+    document = {
+        "game": config.runtime.active_game.value,
+        "obs": {
+            "source_name": config.obs.source_name,
+            "host": config.obs.host,
+            "port": config.obs.port,
+            "password": config.obs.password,
+            "poll_hz": config.obs.poll_hz,
+        },
+        "server": {"host": config.server.host, "port": config.server.port},
+        "confirmer": {
+            "agreement_frames": config.confirmer.agreement_frames,
+            "cooldown_max_seconds": config.confirmer.cooldown_max_seconds,
+            "streak_staleness_seconds": config.confirmer.streak_staleness_seconds,
+        },
+        "runtime": {
+            "enabled_games": sorted(item.value for item in config.runtime.enabled_games),
+            "enabled_events": sorted(
+                item.value for item in config.runtime.enabled_events
+            ),
+        },
+    }
+    Path(path).write_text(tomli_w.dumps(document))
