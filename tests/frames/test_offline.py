@@ -61,3 +61,17 @@ def test_video_source_yields_every_nth_frame(tmp_path):
 def test_video_source_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         list(VideoFrameSource(tmp_path / "nope.mp4", CANONICAL).frames())
+
+
+def test_video_source_skips_wrong_aspect_frames_with_warning(tmp_path, caplog):
+    path = tmp_path / "wrong_aspect.mp4"
+    # Create a video with 1024x768 aspect (4:3) instead of canonical 1920x1080 (16:9)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 30.0, (1024, 768))
+    for index in range(3):
+        writer.write(np.full((768, 1024, 3), index * 10, dtype=np.uint8))
+    writer.release()
+
+    frames = list(VideoFrameSource(path, CANONICAL).frames())
+    assert len(frames) == 0
+    assert "skipping wrong-aspect video frame" in caplog.text
+    assert str(path) in caplog.text

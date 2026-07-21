@@ -81,6 +81,8 @@ class VideoFrameSource:
                         yield Frame(
                             image=normalized, captured_at=datetime.now(timezone.utc)
                         )
+                    else:
+                        log.warning("skipping wrong-aspect video frame: %s [frame %d] %s", self._path, index, image.shape)
                 index += 1
         finally:
             self.close()
