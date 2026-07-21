@@ -34,8 +34,9 @@
 | `src/fgc_detector/frames/obs.py` | `ObsFrameSource` (obs-websocket) |
 | `src/fgc_detector/detectors/roi.py` | `Roi`, `fill_ratio`, `match_template` primitives |
 | `src/fgc_detector/detectors/registry.py` | `Detector` protocol, `get_detector(Game)` |
-| `src/fgc_detector/detectors/sf6.py` | SF6 detector |
-| `src/fgc_detector/detectors/tekken8.py` | Tekken 8 detector |
+| `src/fgc_detector/detectors/marker.py` | `MarkerLayout` + `MarkerRoundDetector`: the algorithm, written once |
+| `src/fgc_detector/detectors/sf6.py` | SF6 layout (coordinates and thresholds only) |
+| `src/fgc_detector/detectors/tekken8.py` | Tekken 8 layout (coordinates and thresholds only) |
 | `src/fgc_detector/confirmer.py` | The state machine |
 | `src/fgc_detector/server.py` | WebSocket server: broadcast + inbound commands |
 | `src/fgc_detector/config.py` | TOML config loading |
@@ -44,7 +45,7 @@
 | `src/fgc_detector/ui/http.py` | Static file server for the config page |
 | `src/fgc_detector/ui/index.html` | The config page (a WebSocket client, no API of its own) |
 
-Tasks 1–15 are game-agnostic and fully testable with synthetic data. Tasks 16–17 need real sample media and are deliberately last.
+Tasks 1–16 are game-agnostic and fully testable with synthetic data — including the whole detection algorithm, exercised against synthetic frames. Tasks 17–18 need real sample media and are deliberately last; each contributes only a game's coordinates and thresholds.
 
 ---
 
@@ -4166,24 +4167,363 @@ git commit -m "feat: browser config page for games and events"
 
 ---
 
-### Task 16: Street Fighter 6 detector
+### Task 16: Marker-based detector base
 
 **Files:**
-- Create: `src/fgc_detector/detectors/sf6.py`, `tests/detectors/test_sf6.py`
+- Create: `src/fgc_detector/detectors/marker.py`
+- Test: `tests/detectors/test_marker.py`
+
+**Interfaces:**
+- Consumes: `Roi`, `fill_ratio` from `detectors/roi.py`; `Frame`, `Game`, `Observation`, `Screen`, `Side`, `EventType` from `types.py`.
+- Produces: `MarkerLayout` frozen dataclass; `MarkerRoundDetector(layout)` satisfying the `Detector` protocol.
+
+**Why this task exists.** Every fighting game in scope is read the same way: count how many round-win markers are lit beside each health bar, and if one side has reached its round count, the match is over. Only the coordinates, the thresholds, and the number of rounds differ. So the algorithm lives here once, and a game contributes a `MarkerLayout` — data, not code.
+
+That split has a second payoff: this task is fully testable against **synthetic** frames with markers painted at known coordinates, so the whole detection algorithm is proven correct before any real sample media exists. Tasks 17 and 18 then reduce to measuring coordinates and tuning three thresholds.
+
+A game whose HUD does not fit this shape is free to implement the `Detector` protocol directly — `MarkerRoundDetector` is a reusable implementation, not a mandatory base class.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/detectors/test_marker.py`:
+
+```python
+from datetime import datetime, timezone
+
+import numpy as np
+import pytest
+
+from fgc_detector.detectors.marker import MarkerLayout, MarkerRoundDetector
+from fgc_detector.detectors.roi import Roi
+from fgc_detector.types import EventType, Frame, Game, Screen, Side
+
+CANONICAL = (1920, 1080)
+
+P1_MARKERS = (Roi(100, 100, 20, 20), Roi(130, 100, 20, 20))
+P2_MARKERS = (Roi(1800, 100, 20, 20), Roi(1770, 100, 20, 20))
+HEALTH_BAR = Roi(200, 60, 400, 20)
+CHAR_SELECT = Roi(900, 500, 40, 40)
+
+LAYOUT = MarkerLayout(
+    game=Game.SF6,
+    rounds_to_win=2,
+    p1_markers=P1_MARKERS,
+    p2_markers=P2_MARKERS,
+    health_bar=HEALTH_BAR,
+    char_select_marker=CHAR_SELECT,
+)
+
+
+def _blank() -> np.ndarray:
+    return np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+
+def _light(image: np.ndarray, roi: Roi) -> np.ndarray:
+    image[roi.y : roi.y + roi.h, roi.x : roi.x + roi.w] = 255
+    return image
+
+
+def _frame(image: np.ndarray) -> Frame:
+    return Frame(image=image, captured_at=datetime.now(timezone.utc))
+
+
+def _in_match_image(p1_lit: int = 0, p2_lit: int = 0) -> np.ndarray:
+    image = _light(_blank(), HEALTH_BAR)
+    for roi in P1_MARKERS[:p1_lit]:
+        _light(image, roi)
+    for roi in P2_MARKERS[:p2_lit]:
+        _light(image, roi)
+    return image
+
+
+@pytest.fixture
+def detector() -> MarkerRoundDetector:
+    return MarkerRoundDetector(LAYOUT)
+
+
+def test_exposes_the_layouts_game(detector):
+    assert detector.game is Game.SF6
+
+
+def test_canonical_size_is_1080p(detector):
+    assert detector.canonical_size == CANONICAL
+
+
+def test_supported_events_is_match_end_only(detector):
+    assert detector.supported_events() == frozenset({EventType.MATCH_END})
+
+
+def test_health_bar_visible_with_no_markers_is_in_match(detector):
+    assert detector.observe(_frame(_in_match_image())).screen is Screen.IN_MATCH
+
+
+def test_partial_markers_is_still_in_match(detector):
+    observation = detector.observe(_frame(_in_match_image(p1_lit=1, p2_lit=1)))
+    assert observation.screen is Screen.IN_MATCH
+    assert observation.winner is None
+
+
+def test_p1_reaching_the_round_count_ends_the_match(detector):
+    observation = detector.observe(_frame(_in_match_image(p1_lit=2, p2_lit=1)))
+    assert observation.screen is Screen.MATCH_END
+    assert observation.winner is Side.P1
+
+
+def test_p2_reaching_the_round_count_ends_the_match(detector):
+    observation = detector.observe(_frame(_in_match_image(p1_lit=1, p2_lit=2)))
+    assert observation.screen is Screen.MATCH_END
+    assert observation.winner is Side.P2
+
+
+def test_both_sides_full_is_not_a_match_end(detector):
+    # Impossible in a real game; means the ROIs are misreading. Refuse to
+    # guess a winner rather than picking one arbitrarily.
+    observation = detector.observe(_frame(_in_match_image(p1_lit=2, p2_lit=2)))
+    assert observation.screen is Screen.IN_MATCH
+    assert observation.winner is None
+
+
+def test_no_health_bar_is_unknown(detector):
+    assert detector.observe(_frame(_blank())).screen is Screen.UNKNOWN
+
+
+def test_char_select_marker_wins_over_everything(detector):
+    # Character select is checked first: it is the Confirmer's only cooldown
+    # exit, so a frame that looks like both must resolve to CHAR_SELECT.
+    image = _light(_in_match_image(p1_lit=2), CHAR_SELECT)
+    assert detector.observe(_frame(image)).screen is Screen.CHAR_SELECT
+
+
+def test_debug_carries_every_named_roi_score(detector):
+    observation = detector.observe(_frame(_in_match_image(p1_lit=2)))
+    assert set(observation.debug) == set(detector.rois())
+    assert observation.debug["p1_round_1"] == pytest.approx(1.0)
+    assert observation.debug["p2_round_1"] == pytest.approx(0.0)
+
+
+def test_confidence_on_match_end_is_the_weakest_winning_marker(detector):
+    image = _in_match_image(p1_lit=2)
+    # Dim the second marker to roughly 70% coverage.
+    roi = P1_MARKERS[1]
+    image[roi.y + 14 : roi.y + roi.h, roi.x : roi.x + roi.w] = 0
+    observation = detector.observe(_frame(image))
+    assert observation.screen is Screen.MATCH_END
+    assert observation.confidence == pytest.approx(0.7, abs=0.05)
+
+
+def test_rois_are_named_and_within_canonical_bounds(detector):
+    width, height = detector.canonical_size
+    names = set(detector.rois())
+    assert names == {
+        "p1_round_1", "p1_round_2", "p2_round_1", "p2_round_2",
+        "health_bar", "char_select_marker",
+    }
+    for name, roi in detector.rois().items():
+        assert roi.x + roi.w <= width, name
+        assert roi.y + roi.h <= height, name
+
+
+def test_detector_is_pure(detector):
+    frame = _frame(_in_match_image(p1_lit=2))
+    assert detector.observe(frame) == detector.observe(frame)
+
+
+def test_layout_rejects_a_marker_count_that_disagrees_with_rounds_to_win():
+    with pytest.raises(ValueError, match="rounds_to_win"):
+        MarkerLayout(
+            game=Game.SF6,
+            rounds_to_win=3,
+            p1_markers=P1_MARKERS,
+            p2_markers=P2_MARKERS,
+            health_bar=HEALTH_BAR,
+            char_select_marker=CHAR_SELECT,
+        )
+
+
+def test_layout_rejects_lopsided_marker_counts():
+    with pytest.raises(ValueError, match="same number"):
+        MarkerLayout(
+            game=Game.SF6,
+            rounds_to_win=2,
+            p1_markers=P1_MARKERS,
+            p2_markers=P2_MARKERS[:1],
+            health_bar=HEALTH_BAR,
+            char_select_marker=CHAR_SELECT,
+        )
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/detectors/test_marker.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'fgc_detector.detectors.marker'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `src/fgc_detector/detectors/marker.py`:
+
+```python
+"""Round-marker detection, written once for every game that works this way.
+
+Every fighting game in scope is read the same way: count the lit round-win
+markers beside each health bar, and if one side has reached its round count the
+match is over. Only coordinates, thresholds and round count differ, so a game
+contributes a MarkerLayout — data, not code.
+
+Markers are position-fixed and language-independent, so unlike an OCR approach
+this imposes no requirement on the game's display language.
+
+A game whose HUD does not fit this shape should implement the Detector protocol
+directly rather than bending this class.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..types import EventType, Frame, Game, Observation, Screen, Side
+from .roi import Roi, fill_ratio
+
+
+@dataclass(frozen=True)
+class MarkerLayout:
+    """Everything that differs between games."""
+
+    game: Game
+    rounds_to_win: int
+    p1_markers: tuple[Roi, ...]
+    p2_markers: tuple[Roi, ...]
+    health_bar: Roi
+    char_select_marker: Roi
+    #: Fill ratio at or above which a round marker counts as lit.
+    marker_filled: float = 0.60
+    #: Fill ratio below which we assume no match HUD is on screen at all.
+    health_bar_present: float = 0.30
+    #: Fill ratio at or above which the character-select screen is showing.
+    char_select_present: float = 0.50
+
+    def __post_init__(self) -> None:
+        if self.rounds_to_win < 1:
+            raise ValueError(f"rounds_to_win must be >= 1, got {self.rounds_to_win}")
+        if len(self.p1_markers) != len(self.p2_markers):
+            raise ValueError(
+                "both sides must have the same number of markers, got "
+                f"{len(self.p1_markers)} and {len(self.p2_markers)}"
+            )
+        if len(self.p1_markers) != self.rounds_to_win:
+            raise ValueError(
+                f"rounds_to_win is {self.rounds_to_win} but {len(self.p1_markers)} "
+                "markers were given per side"
+            )
+
+
+class MarkerRoundDetector:
+    """Classifies a frame by counting lit round markers. Stateless and pure."""
+
+    canonical_size = (1920, 1080)
+
+    def __init__(self, layout: MarkerLayout) -> None:
+        self._layout = layout
+        self.game = layout.game
+
+    def rois(self) -> dict[str, Roi]:
+        layout = self._layout
+        named: dict[str, Roi] = {
+            "health_bar": layout.health_bar,
+            "char_select_marker": layout.char_select_marker,
+        }
+        for index, roi in enumerate(layout.p1_markers, start=1):
+            named[f"p1_round_{index}"] = roi
+        for index, roi in enumerate(layout.p2_markers, start=1):
+            named[f"p2_round_{index}"] = roi
+        return named
+
+    def supported_events(self) -> frozenset[EventType]:
+        return frozenset({EventType.MATCH_END})
+
+    def observe(self, frame: Frame) -> Observation:
+        layout = self._layout
+        image = frame.image
+        scores = {name: fill_ratio(image, roi) for name, roi in self.rois().items()}
+
+        # Checked first: character select is the Confirmer's only cooldown exit,
+        # so a frame that could read as either must resolve to CHAR_SELECT.
+        if scores["char_select_marker"] >= layout.char_select_present:
+            return Observation(
+                screen=Screen.CHAR_SELECT,
+                confidence=scores["char_select_marker"],
+                debug=scores,
+            )
+
+        if scores["health_bar"] < layout.health_bar_present:
+            return Observation(screen=Screen.UNKNOWN, debug=scores)
+
+        p1_lit = self._lit(scores, Side.P1)
+        p2_lit = self._lit(scores, Side.P2)
+
+        p1_won = p1_lit >= layout.rounds_to_win
+        p2_won = p2_lit >= layout.rounds_to_win
+        if p1_won == p2_won:
+            # Neither side is done, or both read as done — the latter is
+            # impossible in a real game and means the ROIs are misreading.
+            # Refuse to guess a winner.
+            return Observation(screen=Screen.IN_MATCH, debug=scores)
+
+        winner = Side.P1 if p1_won else Side.P2
+        marker_scores = [
+            scores[f"{winner.value}_round_{index}"]
+            for index in range(1, layout.rounds_to_win + 1)
+        ]
+        return Observation(
+            screen=Screen.MATCH_END,
+            winner=winner,
+            confidence=min(marker_scores),
+            debug=scores,
+        )
+
+    def _lit(self, scores: dict[str, float], side: Side) -> int:
+        return sum(
+            1
+            for index in range(1, self._layout.rounds_to_win + 1)
+            if scores[f"{side.value}_round_{index}"] >= self._layout.marker_filled
+        )
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `uv run pytest tests/detectors/test_marker.py -v`
+Expected: PASS, 15 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/fgc_detector/detectors/marker.py tests/detectors/test_marker.py
+git commit -m "feat: marker-based detector base"
+```
+
+---
+
+### Task 17: Street Fighter 6 layout
+
+**Files:**
+- Create: `src/fgc_detector/detectors/sf6.py`
+- Modify: `src/fgc_detector/detectors/__init__.py`
+- Create: `tests/detectors/test_game_corpora.py`
 - Create: `samples/sf6/` (committed corpus)
 
 **Interfaces:**
-- Consumes: `Roi`, `fill_ratio`, `match_template`; `Detector` protocol; `register`.
-- Produces: `Sf6Detector` registered for `Game.SF6`, with `rois() -> dict[str, Roi]`.
+- Consumes: `MarkerLayout`, `MarkerRoundDetector`, `Roi`, `register`.
+- Produces: `SF6_LAYOUT`; a registered `MarkerRoundDetector` for `Game.SF6`.
+
+The detection algorithm already exists and is tested (Task 16). This task contributes SF6's coordinates and thresholds, and proves them against real frames.
 
 - [ ] **Step 1: Ask the user for sample media — do not skip or fake this**
 
-**STOP and request samples before writing any code in this task.** ROI coordinates cannot be derived from documentation; they depend on the actual capture resolution and HUD scale. Ask for:
+**STOP and request samples before writing any coordinates.** They cannot be derived from documentation; they depend on the actual capture resolution and HUD scale. Ask for:
 
 1. A VOD (or a few minutes of one) of real SF6 matches from the actual stream setup, ideally including a full set with the post-match replay.
 2. If a VOD is awkward, stills instead: 5+ frames mid-match, 5+ at match end for **each** side winning, 5+ on character select, and 5+ of the post-match replay.
 
-Then label them into `samples/sf6/` using this naming convention, which the test reads directly:
+Label them into `samples/sf6/` using this naming convention, which the corpus test globs directly:
 
 ```
 samples/sf6/in_match_0001.png
@@ -4193,204 +4533,150 @@ samples/sf6/char_select_0001.png
 samples/sf6/replay_0001.png        # labelled in_match; must NOT read as match_end
 ```
 
-- [ ] **Step 2: Locate the ROIs**
+- [ ] **Step 2: Write the layout with measured coordinates**
 
-Open a `match_end_p1` sample and find the round-win markers beside each health bar. Record pixel coordinates at 1920×1080. Verify with:
+Open a `match_end_p1` sample and find the round-win markers beside each health bar, the health bar itself, and a region that is bright on character select but dark during a match. Record pixel coordinates at 1920×1080.
 
-```bash
-uv run fgc-detect roi --game sf6 --sample samples/sf6/match_end_p1_0001.png --out /tmp/sf6_roi.png
-```
-
-(Requires a first-pass `Sf6Detector` with guessed coordinates; iterate until the boxes sit on the markers.)
-
-- [ ] **Step 3: Write the corpus test**
-
-Create `tests/detectors/test_sf6.py`:
+Create `src/fgc_detector/detectors/sf6.py`:
 
 ```python
-from pathlib import Path
+"""Street Fighter 6: two rounds to win, markers beside each health bar.
 
-import cv2
-import pytest
-
-from fgc_detector.detectors.sf6 import Sf6Detector
-from fgc_detector.frames.normalize import normalize
-from fgc_detector.types import Frame, Screen, Side
-
-SAMPLES = Path(__file__).parent.parent.parent / "samples" / "sf6"
-
-
-def _load(path: Path) -> Frame:
-    from datetime import datetime, timezone
-
-    image = cv2.imread(str(path))
-    assert image is not None, f"could not read {path}"
-    normalized = normalize(image, Sf6Detector().canonical_size)
-    assert normalized is not None, f"{path} has an unexpected aspect ratio"
-    return Frame(image=normalized, captured_at=datetime.now(timezone.utc))
-
-
-def _samples(prefix: str) -> list[Path]:
-    paths = sorted(SAMPLES.glob(f"{prefix}_*.png"))
-    assert paths, f"no {prefix} samples found in {SAMPLES}"
-    return paths
-
-
-@pytest.mark.parametrize("path", _samples("in_match"), ids=lambda p: p.name)
-def test_in_match_samples_classify_as_in_match(path):
-    assert Sf6Detector().observe(_load(path)).screen is Screen.IN_MATCH
-
-
-@pytest.mark.parametrize("path", _samples("match_end_p1"), ids=lambda p: p.name)
-def test_p1_wins_samples_report_p1(path):
-    observation = Sf6Detector().observe(_load(path))
-    assert observation.screen is Screen.MATCH_END
-    assert observation.winner is Side.P1
-
-
-@pytest.mark.parametrize("path", _samples("match_end_p2"), ids=lambda p: p.name)
-def test_p2_wins_samples_report_p2(path):
-    observation = Sf6Detector().observe(_load(path))
-    assert observation.screen is Screen.MATCH_END
-    assert observation.winner is Side.P2
-
-
-@pytest.mark.parametrize("path", _samples("char_select"), ids=lambda p: p.name)
-def test_char_select_samples_classify_as_char_select(path):
-    # The Confirmer's cooldown exits only on CHAR_SELECT, so a miss here wedges
-    # the detector until the safety valve fires.
-    assert Sf6Detector().observe(_load(path)).screen is Screen.CHAR_SELECT
-
-
-@pytest.mark.parametrize("path", _samples("replay"), ids=lambda p: p.name)
-def test_replay_samples_never_report_match_end(path):
-    assert Sf6Detector().observe(_load(path)).screen is not Screen.MATCH_END
-
-
-def test_detector_is_pure():
-    detector = Sf6Detector()
-    frame = _load(_samples("match_end_p1")[0])
-    assert detector.observe(frame) == detector.observe(frame)
-
-
-def test_rois_are_named_and_within_canonical_bounds():
-    detector = Sf6Detector()
-    width, height = detector.canonical_size
-    assert detector.rois()
-    for name, roi in detector.rois().items():
-        assert roi.x + roi.w <= width, name
-        assert roi.y + roi.h <= height, name
-```
-
-- [ ] **Step 4: Run tests to verify they fail**
-
-Run: `uv run pytest tests/detectors/test_sf6.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'fgc_detector.detectors.sf6'`
-
-- [ ] **Step 5: Write the detector**
-
-Create `src/fgc_detector/detectors/sf6.py`. Fill the ROI coordinates from Step 2 — the values below are **placeholders that will not work until measured**:
-
-```python
-"""Street Fighter 6 detector.
-
-Reads the round-win markers beside each health bar. Markers are position-fixed
-and language-independent, so unlike an OCR approach this imposes no requirement
-on the game's display language.
+Coordinates measured from samples/sf6/ at 1920x1080. The detection algorithm
+lives in marker.py; this module is only the layout.
 """
 
 from __future__ import annotations
 
-from ..types import EventType, Frame, Game, Observation, Screen, Side
+from ..types import Game
+from .marker import MarkerLayout, MarkerRoundDetector
 from .registry import register
-from .roi import Roi, fill_ratio
+from .roi import Roi
 
-# MEASURE THESE from samples/sf6/ before trusting anything. See Task 16 Step 2.
-_ROIS: dict[str, Roi] = {
-    "p1_round_1": Roi(x=0, y=0, w=1, h=1),
-    "p1_round_2": Roi(x=0, y=0, w=1, h=1),
-    "p2_round_1": Roi(x=0, y=0, w=1, h=1),
-    "p2_round_2": Roi(x=0, y=0, w=1, h=1),
-    "health_bar_p1": Roi(x=0, y=0, w=1, h=1),
-    "char_select_marker": Roi(x=0, y=0, w=1, h=1),
-}
+SF6_LAYOUT = MarkerLayout(
+    game=Game.SF6,
+    rounds_to_win=2,
+    # MEASURE THESE from samples/sf6/ — see Step 3 for the tuning loop.
+    p1_markers=(Roi(x=0, y=0, w=1, h=1), Roi(x=0, y=0, w=1, h=1)),
+    p2_markers=(Roi(x=0, y=0, w=1, h=1), Roi(x=0, y=0, w=1, h=1)),
+    health_bar=Roi(x=0, y=0, w=1, h=1),
+    char_select_marker=Roi(x=0, y=0, w=1, h=1),
+)
 
-_MARKER_FILLED = 0.60
-_HEALTH_BAR_PRESENT = 0.30
-_CHAR_SELECT_PRESENT = 0.50
-_ROUNDS_TO_WIN = 2
-
-
-class Sf6Detector:
-    game = Game.SF6
-    canonical_size = (1920, 1080)
-
-    def rois(self) -> dict[str, Roi]:
-        return dict(_ROIS)
-
-    def supported_events(self) -> frozenset[EventType]:
-        return frozenset({EventType.MATCH_END})
-
-    def observe(self, frame: Frame) -> Observation:
-        image = frame.image
-        scores = {name: fill_ratio(image, roi) for name, roi in _ROIS.items()}
-
-        if scores["char_select_marker"] >= _CHAR_SELECT_PRESENT:
-            return Observation(
-                screen=Screen.CHAR_SELECT,
-                confidence=scores["char_select_marker"],
-                debug=scores,
-            )
-
-        if scores["health_bar_p1"] < _HEALTH_BAR_PRESENT:
-            return Observation(screen=Screen.UNKNOWN, debug=scores)
-
-        p1_rounds = sum(
-            1
-            for index in range(1, _ROUNDS_TO_WIN + 1)
-            if scores[f"p1_round_{index}"] >= _MARKER_FILLED
-        )
-        p2_rounds = sum(
-            1
-            for index in range(1, _ROUNDS_TO_WIN + 1)
-            if scores[f"p2_round_{index}"] >= _MARKER_FILLED
-        )
-
-        if p1_rounds >= _ROUNDS_TO_WIN and p2_rounds < _ROUNDS_TO_WIN:
-            winner = Side.P1
-        elif p2_rounds >= _ROUNDS_TO_WIN and p1_rounds < _ROUNDS_TO_WIN:
-            winner = Side.P2
-        else:
-            return Observation(screen=Screen.IN_MATCH, debug=scores)
-
-        marker_scores = [
-            scores[f"{winner.value}_round_{index}"]
-            for index in range(1, _ROUNDS_TO_WIN + 1)
-        ]
-        return Observation(
-            screen=Screen.MATCH_END,
-            winner=winner,
-            confidence=min(marker_scores),
-            debug=scores,
-        )
-
-
-register(Sf6Detector())
+register(MarkerRoundDetector(SF6_LAYOUT))
 ```
 
-Import the module in `src/fgc_detector/detectors/__init__.py` so registration happens:
+Add to `src/fgc_detector/detectors/__init__.py`:
 
 ```python
 from . import sf6  # noqa: F401  (registers the SF6 detector)
 ```
 
-- [ ] **Step 6: Tune until the corpus passes**
+- [ ] **Step 3: Write the shared corpus test**
 
-Run: `uv run pytest tests/detectors/test_sf6.py -v`
+Create `tests/detectors/test_game_corpora.py`. This file is parametrized over games; Task 18 adds Tekken 8 to `GAMES` and writes no new test code.
 
-Iterate on coordinates and the three thresholds until every test passes. If a threshold has to sit inside a narrow band to work, the ROI is probably in the wrong place — widen the gap by moving the box rather than tightening the number.
+```python
+"""Corpus tests: every game's detector is checked against real sample frames.
 
-- [ ] **Step 7: Verify against a full VOD end to end**
+Parametrized over games so a new game contributes samples and one list entry,
+not a new copy of these assertions.
+"""
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+import cv2
+import pytest
+
+import fgc_detector.detectors  # noqa: F401  (registers every detector)
+from fgc_detector.detectors.registry import get_detector
+from fgc_detector.frames.normalize import normalize
+from fgc_detector.types import Frame, Game, Screen, Side
+
+SAMPLES_ROOT = Path(__file__).parent.parent.parent / "samples"
+
+#: Games with a committed sample corpus. Task 18 appends Game.TEKKEN8.
+GAMES = [Game.SF6]
+
+
+def _load(game: Game, path: Path) -> Frame:
+    image = cv2.imread(str(path))
+    assert image is not None, f"could not read {path}"
+    normalized = normalize(image, get_detector(game).canonical_size)
+    assert normalized is not None, f"{path} has an unexpected aspect ratio"
+    return Frame(image=normalized, captured_at=datetime.now(timezone.utc))
+
+
+def _cases(prefix: str) -> list[tuple[Game, Path]]:
+    """Every (game, sample) pair for one label, failing loudly if a game has none."""
+    cases: list[tuple[Game, Path]] = []
+    for game in GAMES:
+        paths = sorted((SAMPLES_ROOT / game.value).glob(f"{prefix}_*.png"))
+        assert paths, f"no {prefix} samples for {game.value}"
+        cases.extend((game, path) for path in paths)
+    return cases
+
+
+def _ids(case: tuple[Game, Path]) -> str:
+    return f"{case[0].value}-{case[1].name}"
+
+
+@pytest.mark.parametrize("case", _cases("in_match"), ids=_ids)
+def test_in_match_samples_classify_as_in_match(case):
+    game, path = case
+    assert get_detector(game).observe(_load(game, path)).screen is Screen.IN_MATCH
+
+
+@pytest.mark.parametrize("case", _cases("match_end_p1"), ids=_ids)
+def test_p1_wins_samples_report_p1(case):
+    game, path = case
+    observation = get_detector(game).observe(_load(game, path))
+    assert observation.screen is Screen.MATCH_END
+    assert observation.winner is Side.P1
+
+
+@pytest.mark.parametrize("case", _cases("match_end_p2"), ids=_ids)
+def test_p2_wins_samples_report_p2(case):
+    game, path = case
+    observation = get_detector(game).observe(_load(game, path))
+    assert observation.screen is Screen.MATCH_END
+    assert observation.winner is Side.P2
+
+
+@pytest.mark.parametrize("case", _cases("char_select"), ids=_ids)
+def test_char_select_samples_classify_as_char_select(case):
+    # The Confirmer's cooldown exits only on CHAR_SELECT, so a miss here wedges
+    # the detector until the safety valve fires.
+    game, path = case
+    assert get_detector(game).observe(_load(game, path)).screen is Screen.CHAR_SELECT
+
+
+@pytest.mark.parametrize("case", _cases("replay"), ids=_ids)
+def test_replay_samples_never_report_match_end(case):
+    game, path = case
+    assert get_detector(game).observe(_load(game, path)).screen is not Screen.MATCH_END
+```
+
+- [ ] **Step 4: Run tests to verify they fail**
+
+Run: `uv run pytest tests/detectors/test_game_corpora.py -v`
+Expected: FAIL — the placeholder ROIs classify nothing correctly.
+
+- [ ] **Step 5: Tune until the corpus passes**
+
+Preview what the ROIs are actually sampling:
+
+```bash
+uv run fgc-detect roi --game sf6 --sample samples/sf6/match_end_p1_0001.png --out /tmp/sf6_roi.png
+```
+
+Iterate on coordinates in `SF6_LAYOUT`, then on the three thresholds, until every test passes. If a threshold has to sit inside a narrow band to work, the ROI is probably in the wrong place — widen the gap by moving the box rather than tightening the number.
+
+Run: `uv run pytest tests/detectors/test_game_corpora.py -v`
+Expected: PASS
+
+- [ ] **Step 6: Verify against a full VOD end to end**
 
 ```bash
 uv run fgc-detect replay --game sf6 --video <the-vod>.mp4 --evidence-dir /tmp/sf6_evidence
@@ -4398,28 +4684,30 @@ uv run fgc-detect replay --game sf6 --video <the-vod>.mp4 --evidence-dir /tmp/sf
 
 Expected: exactly one `match_end` per game actually played, and none during post-match replays. Compare the printed timeline against the VOD by hand.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/fgc_detector/detectors/sf6.py src/fgc_detector/detectors/__init__.py samples/sf6/ tests/detectors/test_sf6.py
-git commit -m "feat: SF6 detector with sample corpus"
+git add src/fgc_detector/detectors/sf6.py src/fgc_detector/detectors/__init__.py samples/sf6/ tests/detectors/test_game_corpora.py
+git commit -m "feat: SF6 layout with sample corpus"
 ```
 
 ---
 
-### Task 17: Tekken 8 detector
+### Task 18: Tekken 8 layout
 
 **Files:**
-- Create: `src/fgc_detector/detectors/tekken8.py`, `tests/detectors/test_tekken8.py`
+- Create: `src/fgc_detector/detectors/tekken8.py`
+- Modify: `src/fgc_detector/detectors/__init__.py`
+- Modify: `tests/detectors/test_game_corpora.py` (one line)
 - Create: `samples/tekken8/` (committed corpus)
 
 **Interfaces:**
-- Consumes: `Roi`, `fill_ratio`; `register`.
-- Produces: `Tekken8Detector` registered for `Game.TEKKEN8`, with `rois() -> dict[str, Roi]`.
+- Consumes: `MarkerLayout`, `MarkerRoundDetector`, `Roi`, `register`.
+- Produces: `TEKKEN8_LAYOUT`; a registered `MarkerRoundDetector` for `Game.TEKKEN8`.
 
 - [ ] **Step 1: Ask the user for Tekken 8 sample media — do not skip or fake this**
 
-**STOP and request samples.** Same requirements and naming convention as Task 16 Step 1, into `samples/tekken8/`:
+**STOP and request samples.** Same requirements as Task 17 Step 1, labelled into `samples/tekken8/`:
 
 ```
 samples/tekken8/in_match_0001.png
@@ -4429,212 +4717,81 @@ samples/tekken8/char_select_0001.png
 samples/tekken8/replay_0001.png
 ```
 
-Tekken 8 note: sets are commonly first-to-3 rather than first-to-2, so there are more round markers under each health bar. Confirm the round count in the samples rather than assuming — `_ROUNDS_TO_WIN` differs from SF6.
+Tekken 8 sets are commonly first-to-3 rather than first-to-2, so there are more round markers under each health bar. **Confirm the round count from the samples rather than assuming** — `rounds_to_win` and the number of marker ROIs must agree, and `MarkerLayout` raises if they don't.
 
-- [ ] **Step 2: Locate the ROIs**
+- [ ] **Step 2: Write the layout with measured coordinates**
 
-Same procedure as Task 16 Step 2, using:
-
-```bash
-uv run fgc-detect roi --game tekken8 --sample samples/tekken8/match_end_p1_0001.png --out /tmp/t8_roi.png
-```
-
-- [ ] **Step 3: Write the corpus test**
-
-Create `tests/detectors/test_tekken8.py` — the same suite as `test_sf6.py`, with `Sf6Detector` replaced by `Tekken8Detector` and `SAMPLES` pointing at `samples/tekken8`. Repeated in full rather than shared, because the two detectors will diverge as their thresholds are tuned independently:
+Create `src/fgc_detector/detectors/tekken8.py`:
 
 ```python
-from datetime import datetime, timezone
-from pathlib import Path
+"""Tekken 8: markers under each health bar, typically three rounds to win.
 
-import cv2
-import pytest
-
-from fgc_detector.detectors.tekken8 import Tekken8Detector
-from fgc_detector.frames.normalize import normalize
-from fgc_detector.types import Frame, Screen, Side
-
-SAMPLES = Path(__file__).parent.parent.parent / "samples" / "tekken8"
-
-
-def _load(path: Path) -> Frame:
-    image = cv2.imread(str(path))
-    assert image is not None, f"could not read {path}"
-    normalized = normalize(image, Tekken8Detector().canonical_size)
-    assert normalized is not None, f"{path} has an unexpected aspect ratio"
-    return Frame(image=normalized, captured_at=datetime.now(timezone.utc))
-
-
-def _samples(prefix: str) -> list[Path]:
-    paths = sorted(SAMPLES.glob(f"{prefix}_*.png"))
-    assert paths, f"no {prefix} samples found in {SAMPLES}"
-    return paths
-
-
-@pytest.mark.parametrize("path", _samples("in_match"), ids=lambda p: p.name)
-def test_in_match_samples_classify_as_in_match(path):
-    assert Tekken8Detector().observe(_load(path)).screen is Screen.IN_MATCH
-
-
-@pytest.mark.parametrize("path", _samples("match_end_p1"), ids=lambda p: p.name)
-def test_p1_wins_samples_report_p1(path):
-    observation = Tekken8Detector().observe(_load(path))
-    assert observation.screen is Screen.MATCH_END
-    assert observation.winner is Side.P1
-
-
-@pytest.mark.parametrize("path", _samples("match_end_p2"), ids=lambda p: p.name)
-def test_p2_wins_samples_report_p2(path):
-    observation = Tekken8Detector().observe(_load(path))
-    assert observation.screen is Screen.MATCH_END
-    assert observation.winner is Side.P2
-
-
-@pytest.mark.parametrize("path", _samples("char_select"), ids=lambda p: p.name)
-def test_char_select_samples_classify_as_char_select(path):
-    assert Tekken8Detector().observe(_load(path)).screen is Screen.CHAR_SELECT
-
-
-@pytest.mark.parametrize("path", _samples("replay"), ids=lambda p: p.name)
-def test_replay_samples_never_report_match_end(path):
-    assert Tekken8Detector().observe(_load(path)).screen is not Screen.MATCH_END
-
-
-def test_detector_is_pure():
-    detector = Tekken8Detector()
-    frame = _load(_samples("match_end_p1")[0])
-    assert detector.observe(frame) == detector.observe(frame)
-
-
-def test_rois_are_named_and_within_canonical_bounds():
-    detector = Tekken8Detector()
-    width, height = detector.canonical_size
-    assert detector.rois()
-    for name, roi in detector.rois().items():
-        assert roi.x + roi.w <= width, name
-        assert roi.y + roi.h <= height, name
-```
-
-- [ ] **Step 4: Run tests to verify they fail**
-
-Run: `uv run pytest tests/detectors/test_tekken8.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'fgc_detector.detectors.tekken8'`
-
-- [ ] **Step 5: Write the detector**
-
-Create `src/fgc_detector/detectors/tekken8.py`, structured exactly as `sf6.py` (Task 16 Step 5) but with Tekken's own ROIs, thresholds, and `_ROUNDS_TO_WIN` as confirmed in Step 1:
-
-```python
-"""Tekken 8 detector.
-
-Reads the round-win markers under each health bar. Same strategy as SF6, with
-its own coordinates and round count — sets are typically first-to-3.
+Coordinates measured from samples/tekken8/ at 1920x1080. The detection
+algorithm lives in marker.py; this module is only the layout.
 """
 
 from __future__ import annotations
 
-from ..types import EventType, Frame, Game, Observation, Screen, Side
+from ..types import Game
+from .marker import MarkerLayout, MarkerRoundDetector
 from .registry import register
-from .roi import Roi, fill_ratio
+from .roi import Roi
 
-# MEASURE THESE from samples/tekken8/ before trusting anything.
-_ROIS: dict[str, Roi] = {
-    "p1_round_1": Roi(x=0, y=0, w=1, h=1),
-    "p1_round_2": Roi(x=0, y=0, w=1, h=1),
-    "p1_round_3": Roi(x=0, y=0, w=1, h=1),
-    "p2_round_1": Roi(x=0, y=0, w=1, h=1),
-    "p2_round_2": Roi(x=0, y=0, w=1, h=1),
-    "p2_round_3": Roi(x=0, y=0, w=1, h=1),
-    "health_bar_p1": Roi(x=0, y=0, w=1, h=1),
-    "char_select_marker": Roi(x=0, y=0, w=1, h=1),
-}
+TEKKEN8_LAYOUT = MarkerLayout(
+    game=Game.TEKKEN8,
+    # CONFIRM from samples — must equal the number of markers per side below.
+    rounds_to_win=3,
+    # MEASURE THESE from samples/tekken8/.
+    p1_markers=(Roi(x=0, y=0, w=1, h=1),) * 3,
+    p2_markers=(Roi(x=0, y=0, w=1, h=1),) * 3,
+    health_bar=Roi(x=0, y=0, w=1, h=1),
+    char_select_marker=Roi(x=0, y=0, w=1, h=1),
+)
 
-_MARKER_FILLED = 0.60
-_HEALTH_BAR_PRESENT = 0.30
-_CHAR_SELECT_PRESENT = 0.50
-_ROUNDS_TO_WIN = 3
-
-
-class Tekken8Detector:
-    game = Game.TEKKEN8
-    canonical_size = (1920, 1080)
-
-    def rois(self) -> dict[str, Roi]:
-        return dict(_ROIS)
-
-    def supported_events(self) -> frozenset[EventType]:
-        return frozenset({EventType.MATCH_END})
-
-    def observe(self, frame: Frame) -> Observation:
-        image = frame.image
-        scores = {name: fill_ratio(image, roi) for name, roi in _ROIS.items()}
-
-        if scores["char_select_marker"] >= _CHAR_SELECT_PRESENT:
-            return Observation(
-                screen=Screen.CHAR_SELECT,
-                confidence=scores["char_select_marker"],
-                debug=scores,
-            )
-
-        if scores["health_bar_p1"] < _HEALTH_BAR_PRESENT:
-            return Observation(screen=Screen.UNKNOWN, debug=scores)
-
-        p1_rounds = sum(
-            1
-            for index in range(1, _ROUNDS_TO_WIN + 1)
-            if scores[f"p1_round_{index}"] >= _MARKER_FILLED
-        )
-        p2_rounds = sum(
-            1
-            for index in range(1, _ROUNDS_TO_WIN + 1)
-            if scores[f"p2_round_{index}"] >= _MARKER_FILLED
-        )
-
-        if p1_rounds >= _ROUNDS_TO_WIN and p2_rounds < _ROUNDS_TO_WIN:
-            winner = Side.P1
-        elif p2_rounds >= _ROUNDS_TO_WIN and p1_rounds < _ROUNDS_TO_WIN:
-            winner = Side.P2
-        else:
-            return Observation(screen=Screen.IN_MATCH, debug=scores)
-
-        marker_scores = [
-            scores[f"{winner.value}_round_{index}"]
-            for index in range(1, _ROUNDS_TO_WIN + 1)
-        ]
-        return Observation(
-            screen=Screen.MATCH_END,
-            winner=winner,
-            confidence=min(marker_scores),
-            debug=scores,
-        )
-
-
-register(Tekken8Detector())
+register(MarkerRoundDetector(TEKKEN8_LAYOUT))
 ```
 
 Add to `src/fgc_detector/detectors/__init__.py`:
 
 ```python
-from . import sf6  # noqa: F401  (registers the SF6 detector)
 from . import tekken8  # noqa: F401  (registers the Tekken 8 detector)
 ```
 
-- [ ] **Step 6: Tune until the corpus passes**
+- [ ] **Step 3: Add Tekken 8 to the corpus test**
 
-Run: `uv run pytest tests/detectors/test_tekken8.py -v`
+In `tests/detectors/test_game_corpora.py`, extend the games list — this is the only test change this task needs:
 
-- [ ] **Step 7: Verify against a full VOD end to end**
+```python
+#: Games with a committed sample corpus.
+GAMES = [Game.SF6, Game.TEKKEN8]
+```
+
+- [ ] **Step 4: Run tests to verify they fail**
+
+Run: `uv run pytest tests/detectors/test_game_corpora.py -v`
+Expected: FAIL on the `tekken8-*` cases; the `sf6-*` cases must still pass.
+
+- [ ] **Step 5: Tune until the corpus passes**
+
+```bash
+uv run fgc-detect roi --game tekken8 --sample samples/tekken8/match_end_p1_0001.png --out /tmp/t8_roi.png
+```
+
+Run: `uv run pytest tests/detectors/test_game_corpora.py -v`
+Expected: PASS, every game
+
+- [ ] **Step 6: Verify against a full VOD end to end**
 
 ```bash
 uv run fgc-detect replay --game tekken8 --video <the-vod>.mp4 --evidence-dir /tmp/t8_evidence
 ```
 
-- [ ] **Step 8: Run the full suite and commit**
+- [ ] **Step 7: Run the full suite and commit**
 
 ```bash
 uv run pytest -v
-git add src/fgc_detector/detectors/tekken8.py src/fgc_detector/detectors/__init__.py samples/tekken8/ tests/detectors/test_tekken8.py
-git commit -m "feat: Tekken 8 detector with sample corpus"
+git add src/fgc_detector/detectors/tekken8.py src/fgc_detector/detectors/__init__.py samples/tekken8/ tests/detectors/test_game_corpora.py
+git commit -m "feat: Tekken 8 layout with sample corpus"
 ```
 
 ---
