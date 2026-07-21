@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from fgc_detector.frames.obs import ObsFrameSource
+from fgc_detector.frames.obs import _MAX_BACKOFF_SECONDS, ObsFrameSource
 
 CANONICAL = (1920, 1080)
 
@@ -25,7 +25,11 @@ class FakeClient:
     """Stands in for obsws_python.ReqClient."""
 
     def __init__(self, responses):
-        self._responses = list(responses)
+        # `responses` is a shared, mutable list: when a failure causes
+        # ObsFrameSource to discard this client and build a new one via the
+        # factory, the replacement client must continue consuming the same
+        # underlying queue rather than starting over.
+        self._responses = responses
         self.calls = []
         self.disconnected = False
 
@@ -42,16 +46,35 @@ class FakeClient:
         self.disconnected = True
 
 
-def _source(responses, **kwargs):
-    client = FakeClient(responses)
+class RecordingClientFactory:
+    """A client_factory that builds a fresh FakeClient each call and records
+    every client it has produced, so tests can observe reconnection directly
+    (invocation count, and which discarded client got disconnect()ed)."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.clients: list[FakeClient] = []
+
+    def __call__(self) -> FakeClient:
+        client = FakeClient(self._responses)
+        self.clients.append(client)
+        return client
+
+    @property
+    def call_count(self) -> int:
+        return len(self.clients)
+
+
+def _source(responses, sleeper=None, **kwargs):
+    factory = RecordingClientFactory(responses)
     source = ObsFrameSource(
-        client_factory=lambda: client,
+        client_factory=factory,
         source_name="Game Capture",
         canonical=CANONICAL,
-        sleeper=lambda _seconds: None,
+        sleeper=sleeper if sleeper is not None else (lambda _seconds: None),
         **kwargs,
     )
-    return source, client
+    return source, factory
 
 
 def test_decodes_screenshot_into_normalized_frame():
@@ -62,9 +85,9 @@ def test_decodes_screenshot_into_normalized_frame():
 
 
 def test_requests_the_configured_source_by_name():
-    source, client = _source([_data_uri()])
+    source, factory = _source([_data_uri()])
     next(source.frames())
-    assert client.calls[0][0] == "Game Capture"
+    assert factory.clients[0].calls[0][0] == "Game Capture"
 
 
 def test_marks_connected_after_a_successful_capture():
@@ -95,10 +118,72 @@ def test_wrong_aspect_screenshot_yields_no_frame():
 
 
 def test_close_disconnects_the_client():
-    source, client = _source([_data_uri()])
+    source, factory = _source([_data_uri()])
     next(source.frames())
     source.close()
-    assert client.disconnected is True
+    assert factory.clients[0].disconnected is True
+
+
+def test_failed_attempt_rebuilds_client_via_factory():
+    """After a failed attempt, the next attempt must build a fresh client
+    through client_factory rather than silently reusing the dead one."""
+    source, factory = _source([ConnectionError("boom"), _data_uri()])
+    frames = source.frames()
+    next(frames)
+    assert factory.call_count == 2
+
+
+def test_failed_attempt_disconnects_the_discarded_client():
+    """The client abandoned after a failed attempt must be disconnect()ed,
+    not merely dropped — otherwise its socket/thread leaks."""
+    source, factory = _source([ConnectionError("boom"), _data_uri()])
+    frames = source.frames()
+    next(frames)
+    assert len(factory.clients) == 2
+    stale_client, fresh_client = factory.clients
+    assert stale_client.disconnected is True
+    assert fresh_client.disconnected is False
+
+
+def test_backoff_grows_and_is_capped_across_consecutive_failures():
+    # frames() only yields control back to the caller on a *successful*
+    # capture — a run of failures is retried internally within a single
+    # next(frames) call. So seven failures followed by one success, driven
+    # by a single next(), lets us observe every backoff sleep in sequence.
+    sleeps: list[float] = []
+    source, _ = _source(
+        [ConnectionError("boom")] * 7 + [_data_uri()],
+        sleeper=lambda seconds: sleeps.append(seconds),
+    )
+    frame = next(source.frames())
+    assert frame.image.shape == (1080, 1920, 3)
+
+    assert sleeps == [0.5, 1.0, 2.0, 4.0, 8.0, 10.0, 10.0]
+    assert sleeps[-1] == _MAX_BACKOFF_SECONDS
+
+
+def test_backoff_resets_after_a_successful_capture():
+    sleeps: list[float] = []
+    source, _ = _source(
+        [
+            ConnectionError("boom"),
+            ConnectionError("boom"),
+            _data_uri(),
+            ConnectionError("boom"),
+            _data_uri(),
+        ],
+        sleeper=lambda seconds: sleeps.append(seconds),
+    )
+    frames = source.frames()
+    next(frames)  # succeeds on the third attempt, after two failures growing backoff to 2.0
+    assert sleeps == [0.5, 1.0]
+
+    sleeps.clear()
+    next(frames)  # normal-cadence sleep, then one failure, then a fresh success
+    # sleeps[0] is the post-success normal-cadence sleep (poll interval).
+    # sleeps[1] is the backoff used for the failure right after that success:
+    # if backoff had not reset, it would continue growing from 2.0 instead.
+    assert sleeps[1] == 0.5
 
 
 def test_invalid_poll_rate_rejected():
