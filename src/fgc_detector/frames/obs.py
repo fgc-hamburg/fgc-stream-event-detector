@@ -67,7 +67,13 @@ class ObsFrameSource:
         except Exception as exc:  # obsws raises a wide variety; none are fatal here
             log.warning("OBS capture failed: %s", exc)
             self._connected = False
+            stale_client = self._client
             self._client = None
+            if stale_client is not None:
+                try:
+                    stale_client.disconnect()
+                except Exception as disconnect_exc:
+                    log.debug("error disconnecting stale OBS client: %s", disconnect_exc)
             return None
 
         self._connected = True
