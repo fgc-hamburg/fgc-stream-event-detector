@@ -16,6 +16,25 @@ def test_crop_returns_the_requested_rectangle():
     assert cropped.min() == 255
 
 
+def test_crop_at_exact_right_edge_returns_full_rectangle():
+    # x + w == width is in-bounds: the strict `>` check must accept it. If
+    # the bounds check ever flips to `>=`, this must fail.
+    image = _black(width=100, height=100)
+    image[10:20, 80:100] = 255
+    cropped = Roi(80, 10, 20, 10).crop(image)
+    assert cropped.shape == (10, 20, 3)
+    assert cropped.min() == 255
+
+
+def test_crop_at_exact_bottom_edge_returns_full_rectangle():
+    # y + h == height is in-bounds, mirroring the right-edge case above.
+    image = _black(width=100, height=100)
+    image[80:100, 10:20] = 255
+    cropped = Roi(10, 80, 10, 20).crop(image)
+    assert cropped.shape == (20, 10, 3)
+    assert cropped.min() == 255
+
+
 def test_roi_rejects_non_positive_size():
     with pytest.raises(ValueError):
         Roi(0, 0, 0, 10)

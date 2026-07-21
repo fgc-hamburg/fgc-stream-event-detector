@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pytest
 
+from fgc_detector import cli as cli_module
 from fgc_detector.cli import _pump, main
 from fgc_detector.confirmer import Confirmer, ConfirmerConfig
 from fgc_detector.detectors.registry import NullDetector, register
@@ -58,6 +59,52 @@ def test_replay_contains_a_mid_vod_failure_and_exits_nonzero(tmp_path, capsys, m
     captured = capsys.readouterr()
     assert code == 2
     assert "decode exploded" in captured.err
+
+
+# --- _cmd_run: resource guard around serve_ui (Finding 1) ---
+
+
+def _write_minimal_config(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+        game = "sf6"
+
+        [obs]
+        source_name = "capture"
+
+        [server]
+        """
+    )
+    return config_path
+
+
+def test_failing_serve_ui_still_closes_the_obs_source(tmp_path, monkeypatch):
+    """Finding 1: serve_ui is called after `source` (an ObsFrameSource) is
+    constructed but before the try/finally that closes it. If serve_ui raises
+    - most plausibly because ui_port is already bound - source must still be
+    closed rather than leaked. Reverting the guard in _cmd_run must make this
+    fail."""
+    config_path = _write_minimal_config(tmp_path)
+    register(NullDetector(Game.SF6))
+
+    closed = []
+    real_close = cli_module.ObsFrameSource.close
+    monkeypatch.setattr(
+        cli_module.ObsFrameSource,
+        "close",
+        lambda self: (closed.append(True), real_close(self))[1],
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "serve_ui",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ui_port in use")),
+    )
+
+    with pytest.raises(RuntimeError, match="ui_port in use"):
+        main(["run", "--config", str(config_path)])
+
+    assert closed == [True], "source.close() must run even when serve_ui raises"
 
 
 # --- _pump: the live pipeline's per-frame loop, exercised without OBS/asyncio server ---
@@ -192,7 +239,18 @@ def test_cancelling_the_pump_lets_asyncio_run_shut_down_promptly():
     would wait for a thread that will never finish.
 
     Run in a background thread with a bounded join so a regression fails
-    the test instead of hanging the suite."""
+    the test instead of hanging the suite.
+
+    NOTE for future maintainers: this test exercises a real shutdown race by
+    design, and a hang IS the failure signal for that race - it is not
+    something to "fix" by simplifying the test. The bounded `runner.join`
+    below converts a regression into a clean assertion failure for the main
+    test process, but the daemon thread itself is left running (Python
+    cannot forcibly kill a thread) if the code under test really does hang.
+    That means a regression here can still leave a stuck background thread
+    inside the pytest worker process after the test "fails" - if a mutation
+    or CI run leaves a worker that needs a manual kill, that is this test
+    catching a real regression, not a flaky test to retry."""
     confirmer = Confirmer(Game.SF6, ConfirmerConfig())
     source = BlockingFrameSource()
     server = RecordingServer(confirmer)
