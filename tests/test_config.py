@@ -1,7 +1,12 @@
+import re
+from pathlib import Path
+
 import pytest
 
 from fgc_detector.config import ConfigError, load_config
 from fgc_detector.types import Game
+
+EXAMPLE_CONFIG = Path(__file__).resolve().parent.parent / "config.example.toml"
 
 VALID = """
 game = "sf6"
@@ -71,3 +76,34 @@ source_name = "Capture"
 def test_malformed_toml_raises_config_error(tmp_path):
     with pytest.raises(ConfigError, match="could not be parsed"):
         load_config(_write(tmp_path, "this is [not toml"))
+
+
+def test_missing_game_key_raises_config_error(tmp_path):
+    text = VALID.replace('game = "sf6"\n', "")
+    with pytest.raises(ConfigError, match="game is required"):
+        load_config(_write(tmp_path, text))
+
+
+@pytest.mark.parametrize("section", ["obs", "server", "confirmer"])
+def test_non_table_section_raises_config_error(tmp_path, section):
+    # Drop the [section] table entirely and give the same key a scalar value
+    # instead, so it is a genuinely non-table value at the top level.
+    text = re.sub(rf"\[{section}\]\n(?:[^\[\n]*\n)*", "", VALID)
+    text = f'{section} = "oops"\n' + text
+    with pytest.raises(ConfigError, match=section):
+        load_config(_write(tmp_path, text))
+
+
+def test_example_config_loads_cleanly_with_documented_defaults():
+    config = load_config(EXAMPLE_CONFIG)
+    assert config.game is Game.SF6
+    assert config.obs.source_name == "Game Capture"
+    assert config.obs.host == "localhost"
+    assert config.obs.port == 4455
+    assert config.obs.password == ""
+    assert config.obs.poll_hz == 5.0
+    assert config.server.host == "127.0.0.1"
+    assert config.server.port == 6600
+    assert config.confirmer.agreement_frames == 3
+    assert config.confirmer.cooldown_max_seconds == 180.0
+    assert config.confirmer.streak_staleness_seconds == 3.0

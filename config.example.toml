@@ -24,3 +24,8 @@ agreement_frames = 3
 # Safety valve: release cooldown after this long without seeing character
 # select, in case that ROI is miscalibrated. Arming is the primary reset.
 cooldown_max_seconds = 180.0
+# How long a partial agreement streak (fewer than agreement_frames matching
+# observations) stays valid before it is discarded. Without this bound,
+# scattered misreads far apart in time could still combine into a false
+# detection.
+streak_staleness_seconds = 3.0

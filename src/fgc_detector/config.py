@@ -38,6 +38,16 @@ class AppConfig:
     confirmer: ConfirmerConfig
 
 
+def _require_table(raw: dict[str, Any], section: str) -> dict[str, Any]:
+    """Return raw[section] as a table, or raise ConfigError naming the section."""
+    value = raw.get(section, {})
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"config section {section!r} must be a table, got {type(value).__name__}"
+        )
+    return value
+
+
 def load_config(path: Path) -> AppConfig:
     path = Path(path)
     if not path.exists():
@@ -48,15 +58,24 @@ def load_config(path: Path) -> AppConfig:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"config could not be parsed: {exc}") from exc
 
+    if "game" not in raw:
+        raise ConfigError(
+            "game is required; expected one of: "
+            + ", ".join(item.value for item in Game)
+        )
+
     try:
         game = Game(raw.get("game"))
     except ValueError as exc:
         raise ConfigError(f"unknown game: {raw.get('game')!r}") from exc
 
-    obs_section = raw.get("obs", {})
+    obs_section = _require_table(raw, "obs")
     source_name = obs_section.get("source_name")
     if not source_name:
         raise ConfigError("obs.source_name is required")
+
+    server_section = _require_table(raw, "server")
+    confirmer_section = _require_table(raw, "confirmer")
 
     try:
         obs = ObsConfig(
@@ -66,12 +85,10 @@ def load_config(path: Path) -> AppConfig:
             password=obs_section.get("password", ""),
             poll_hz=float(obs_section.get("poll_hz", 5.0)),
         )
-        server_section = raw.get("server", {})
         server = ServerConfig(
             host=server_section.get("host", "127.0.0.1"),
             port=int(server_section.get("port", 6600)),
         )
-        confirmer_section = raw.get("confirmer", {})
         confirmer = ConfirmerConfig(
             agreement_frames=int(confirmer_section.get("agreement_frames", 3)),
             cooldown_max_seconds=float(
