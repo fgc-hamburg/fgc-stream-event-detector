@@ -8,11 +8,19 @@ observation sequences — no images, no OBS, no real clock.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .events import MatchEndEvent
-from .types import ConfirmerState, Game, Observation, Screen, Side
+from .types import (
+    DETAIL_P1_ROUNDS,
+    DETAIL_P2_ROUNDS,
+    ConfirmerState,
+    Game,
+    Observation,
+    Screen,
+    Side,
+)
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +57,7 @@ class Confirmer:
         self._streak_last_ts: datetime | None = None
         self._cooldown_started: datetime | None = None
         self._zero_streak: list[Observation] = []
+        self._zero_streak_last_ts: datetime | None = None
 
     @property
     def state(self) -> ConfirmerState:
@@ -81,6 +90,7 @@ class Confirmer:
         self._streak_last_ts = None
         self._cooldown_started = None
         self._zero_streak.clear()
+        self._zero_streak_last_ts = None
 
     def observe(self, observation: Observation, now: datetime) -> MatchEndEvent | None:
         """Feed one observation. Returns an event only when one is confirmed."""
@@ -139,6 +149,11 @@ class Confirmer:
         self._cooldown_started = now
         self._streak.clear()
         self._streak_last_ts = None
+        # Explicit, not incidental: every other route into COOLDOWN goes
+        # through _reset(), which also clears this. State this invariant
+        # here too so it doesn't depend on that being the only entry point.
+        self._zero_streak.clear()
+        self._zero_streak_last_ts = None
         log.info(
             "confirmed match_end game=%s winner=%s confidence=%.4f",
             self._game.value,
@@ -162,13 +177,13 @@ class Confirmer:
         if observation.screen is not Screen.IN_MATCH:
             return False
         details = observation.details
-        p1_raw = details.get("p1_rounds")
-        p2_raw = details.get("p2_rounds")
+        p1_raw = details.get(DETAIL_P1_ROUNDS)
+        p2_raw = details.get(DETAIL_P2_ROUNDS)
         if p1_raw is None or p2_raw is None:
             return False
         try:
             return int(p1_raw) == 0 and int(p2_raw) == 0
-        except ValueError:
+        except (ValueError, TypeError):
             return False
 
     def _observe_cooldown(self, observation: Observation, now: datetime) -> None:
@@ -192,18 +207,55 @@ class Confirmer:
         every set whose rematch skips character select, which is the more
         damaging and more common failure. The safety valve below prevents a
         missed signal from wedging the detector forever.
+
+        There is a second, distinct way this exit can misfire, separate from
+        the round-1-replay case above: if a detector misreads the still-
+        displayed win screen as IN_MATCH with 0-0 markers for
+        `agreement_frames` consecutive frames, cooldown releases on a screen
+        that was never a fresh game at all. The next IN_MATCH promotes to
+        LIVE, and the win screen's MATCH_END frames (still on screen) then
+        confirm a duplicate event for the *same* game. This is more likely at
+        this operator's events than a round-1 replay -- a win screen is
+        guaranteed after every game, a replay is not. The primary defence is
+        at the detector level: a correctly-implemented detector reports
+        UNKNOWN on a win screen (it has no health bar to match against), not
+        IN_MATCH. Agreement over `agreement_frames` frames plus the
+        MATCH_END-clears-the-counter rule below are secondary defences, not
+        a guarantee. This Confirmer deliberately does not try to close this
+        gap further: doing so would re-introduce the missed-game-2 failure
+        the 0-0 exit exists to fix.
+
+        Like the MATCH_END streak in _observe_live, this counter treats
+        UNKNOWN observations as neutral -- they neither extend nor break a
+        run of 0-0 frames, since transitions and flashes are common -- and is
+        bounded by `streak_staleness_seconds` so a stale partial run (e.g.
+        either side of a capture stall) cannot combine with a fresh one to
+        release cooldown.
         """
         if observation.screen is Screen.CHAR_SELECT:
             self._reset()
             return None
 
-        if self._is_fresh_game_start(observation):
+        if observation.screen is Screen.UNKNOWN:
+            pass  # neutral: neither extends nor breaks the run, like _streak.
+        elif self._is_fresh_game_start(observation):
+            stale = (
+                self._zero_streak_last_ts is not None
+                and now - self._zero_streak_last_ts
+                > timedelta(seconds=self._config.streak_staleness_seconds)
+            )
+            if stale:
+                self._zero_streak.clear()
             self._zero_streak.append(observation)
+            self._zero_streak_last_ts = now
             if len(self._zero_streak) >= self._config.agreement_frames:
                 self._reset()
                 return None
         else:
+            # Positive evidence the previous game is still on screen (e.g. a
+            # MATCH_END frame, or IN_MATCH with nonzero/missing round data).
             self._zero_streak.clear()
+            self._zero_streak_last_ts = None
 
         if self._cooldown_started is not None:
             elapsed = now - self._cooldown_started

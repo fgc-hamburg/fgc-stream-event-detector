@@ -57,6 +57,10 @@ class Screen(Enum):
 _EMPTY_STR_MAP: Mapping[str, str] = MappingProxyType({})
 _EMPTY_NUM_MAP: Mapping[str, float] = MappingProxyType({})
 
+#: Keys under which detectors publish per-side round-win counts in Observation.details.
+DETAIL_P1_ROUNDS = "p1_rounds"
+DETAIL_P2_ROUNDS = "p2_rounds"
+
 
 @dataclass(frozen=True)
 class Frame:

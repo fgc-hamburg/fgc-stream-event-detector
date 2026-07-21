@@ -3,7 +3,15 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from fgc_detector.confirmer import Confirmer, ConfirmerConfig
-from fgc_detector.types import ConfirmerState, Game, Observation, Screen, Side
+from fgc_detector.types import (
+    DETAIL_P1_ROUNDS,
+    DETAIL_P2_ROUNDS,
+    ConfirmerState,
+    Game,
+    Observation,
+    Screen,
+    Side,
+)
 
 START = datetime(2026, 7, 21, 20, 0, 0, tzinfo=timezone.utc)
 
@@ -21,7 +29,10 @@ def _char_select() -> Observation:
 
 
 def _in_match_rounds(p1: str, p2: str) -> Observation:
-    return Observation(screen=Screen.IN_MATCH, details={"p1_rounds": p1, "p2_rounds": p2})
+    return Observation(
+        screen=Screen.IN_MATCH,
+        details={DETAIL_P1_ROUNDS: p1, DETAIL_P2_ROUNDS: p2},
+    )
 
 
 class Driver:
@@ -162,6 +173,17 @@ def test_a_replay_starting_from_round_one_does_release_cooldown_known_limitation
         "documented limitation: a round-1 replay releases cooldown"
     )
 
+    # The replay is still playing out on screen: its gameplay promotes back
+    # to LIVE, and its (replayed) KO then confirms a second, phantom event
+    # for what is really still the same game.
+    driver.feed(_in_match(), 3)
+    driver.feed(_match_end(Side.P1), 3)
+    assert len(driver.events) == 2, (
+        "documented limitation: the released cooldown lets the replayed KO "
+        "fire a phantom duplicate event"
+    )
+    assert driver.events[1].winner is Side.P1
+
 
 def test_char_select_ends_cooldown_and_the_next_match_can_fire(driver):
     driver.feed(_in_match(), 5).feed(_match_end(Side.P1), 3)
@@ -275,7 +297,13 @@ def test_missing_or_unparseable_round_details_do_not_release_cooldown_or_raise(d
     driver.feed(_in_match(), 5)  # no details at all (e.g. NullDetector)
     assert driver.confirmer.state is ConfirmerState.COOLDOWN
 
-    driver.feed(Observation(screen=Screen.IN_MATCH, details={"p1_rounds": "oops", "p2_rounds": "0"}), 5)
+    driver.feed(
+        Observation(
+            screen=Screen.IN_MATCH,
+            details={DETAIL_P1_ROUNDS: "oops", DETAIL_P2_ROUNDS: "0"},
+        ),
+        5,
+    )
     assert driver.confirmer.state is ConfirmerState.COOLDOWN
 
 
@@ -308,3 +336,135 @@ def test_match_end_without_a_winner_is_ignored(driver):
 def test_agreement_frames_must_be_positive():
     with pytest.raises(ValueError):
         ConfirmerConfig(agreement_frames=0)
+
+
+def test_unknown_frames_interleaved_within_a_zero_streak_still_release_cooldown(driver):
+    """Finding 1's missed-detection regression.
+
+    Before this fix, _observe_cooldown treated ANY non-fresh-game observation
+    -- including UNKNOWN -- as clearing _zero_streak, unlike the symmetric
+    treatment UNKNOWN already got in _observe_live. A single UNKNOWN flicker
+    at the start of game 2 (transitions and flashes are common there) would
+    then prevent cooldown from ever releasing on the 0-0 path, wedging the
+    detector until the 180s safety valve -- by which point game 2 may be
+    over. UNKNOWN must be neutral here exactly as it is for the MATCH_END
+    streak.
+    """
+    driver.feed(_in_match(), 5).feed(_match_end(Side.P1), 3)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+    driver.feed(_in_match_rounds("0", "0"), 1)
+    driver.feed(Observation(Screen.UNKNOWN), 1)
+    driver.feed(_in_match_rounds("0", "0"), 1)
+    driver.feed(Observation(Screen.UNKNOWN), 1)
+    driver.feed(_in_match_rounds("0", "0"), 1)
+    assert driver.confirmer.state is ConfirmerState.IDLE
+
+
+def test_zero_streak_spanning_a_gap_past_staleness_does_not_release_cooldown(driver):
+    driver.feed(_in_match(), 5).feed(_match_end(Side.P1), 3)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+    driver.feed(_in_match_rounds("0", "0"), 2)
+    driver.advance(10)  # past streak_staleness_seconds, well short of the 180s safety valve
+    driver.feed(_in_match_rounds("0", "0"), 1)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+
+def test_zero_streak_within_staleness_window_still_releases_cooldown(driver):
+    driver.feed(_in_match(), 5).feed(_match_end(Side.P1), 3)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+    driver.feed(_in_match_rounds("0", "0"), 2)
+    driver.advance(1)  # within the default 3s staleness window
+    driver.feed(_in_match_rounds("0", "0"), 1)
+    assert driver.confirmer.state is ConfirmerState.IDLE
+
+
+def test_zero_streak_staleness_boundary_is_inclusive():
+    """A gap of exactly streak_staleness_seconds must not discard the streak.
+
+    Mirrors the MATCH_END streak's `>` (not `>=`) staleness comparison: only
+    a gap strictly greater than the configured window counts as stale. Uses
+    a zero-step driver so the boundary gap is exact, not fudged by the
+    fixture's per-frame step.
+    """
+    confirmer = Confirmer(Game.SF6, ConfirmerConfig(agreement_frames=3))
+    confirmer.arm()
+    driver = Driver(confirmer, step=0.0)
+    driver.feed(_in_match(), 1).feed(_match_end(Side.P1), 3)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+    driver.feed(_in_match_rounds("0", "0"), 2)
+    driver.advance(3.0)  # exactly streak_staleness_seconds
+    driver.feed(_in_match_rounds("0", "0"), 1)
+    assert driver.confirmer.state is ConfirmerState.IDLE
+
+
+def test_match_end_streak_staleness_boundary_is_inclusive():
+    """A gap of exactly streak_staleness_seconds must not discard the streak."""
+    confirmer = Confirmer(Game.SF6, ConfirmerConfig(agreement_frames=3))
+    confirmer.arm()
+    driver = Driver(confirmer, step=0.0)
+    driver.feed(_in_match(), 1)
+    driver.feed(_match_end(Side.P1), 2)
+    driver.advance(3.0)  # exactly streak_staleness_seconds
+    driver.feed(_match_end(Side.P1), 1)
+    assert len(driver.events) == 1
+
+
+def test_match_end_streak_after_stale_discard_counts_as_one_not_zero(driver):
+    """A mutant that clears _streak without appending the new frame would
+    pass the existing staleness tests (they only assert non-firing) but
+    would require a 4th agreeing frame here instead of the 3rd. Pin the
+    count, not just the non-firing behavior.
+    """
+    driver.feed(_in_match(), 5)
+    driver.feed(_match_end(Side.P1), 2)
+    driver.advance(600)  # discard: well past staleness
+    driver.feed(_match_end(Side.P1), 3)  # the discarded frame counts as 1, so 3 more fire
+    assert len(driver.events) == 1
+
+
+def test_zero_streak_after_stale_discard_counts_as_one_not_zero(driver):
+    """Same pin as the MATCH_END streak, for _zero_streak."""
+    driver.feed(_in_match(), 5).feed(_match_end(Side.P1), 3)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+    driver.feed(_in_match_rounds("0", "0"), 2)
+    driver.advance(10)  # discard: past staleness, well short of the 180s safety valve
+    driver.feed(_in_match_rounds("0", "0"), 3)  # discarded frame counts as 1, so 3 more release
+    assert driver.confirmer.state is ConfirmerState.IDLE
+
+
+def test_detector_misreading_win_screen_as_fresh_game_fires_phantom_duplicate(driver):
+    """Finding 2: an undocumented spurious release path, distinct from the
+    round-1-replay limitation above.
+
+    If a detector misreads the still-displayed win screen itself as IN_MATCH
+    with 0-0 markers (rather than genuinely replaying gameplay), the same
+    0-0 exit releases cooldown on a screen that was never a fresh game. The
+    next IN_MATCH observation (the same misread win screen) promotes back to
+    LIVE, and the win screen's MATCH_END frames then confirm a duplicate
+    event for the *same* game.
+
+    This is documented, not fixed, here: the correct fix is at the detector
+    level (a win screen has no health bar, so a correct detector reports
+    UNKNOWN, not IN_MATCH). Agreement over `agreement_frames` frames and the
+    MATCH_END-clears-the-counter rule are secondary defences only.
+    """
+    driver.feed(_in_match(), 5).feed(_match_end(Side.P1), 3)
+    assert len(driver.events) == 1
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+    # The win screen is still on screen, but a detector bug reports it as a
+    # fresh IN_MATCH 0-0 for `agreement_frames` consecutive frames.
+    driver.feed(_in_match_rounds("0", "0"), 3)
+    assert driver.confirmer.state is ConfirmerState.IDLE
+
+    # The still-displayed win screen promotes back to LIVE...
+    driver.feed(_in_match(), 3)
+    # ...and its MATCH_END frames confirm a phantom duplicate for the same game.
+    driver.feed(_match_end(Side.P1), 3)
+    assert len(driver.events) == 2
+    assert driver.events[1].winner is Side.P1
