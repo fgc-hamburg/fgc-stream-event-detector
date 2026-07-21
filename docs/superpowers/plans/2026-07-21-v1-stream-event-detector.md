@@ -1536,6 +1536,30 @@ git commit -m "feat: detector protocol and registry"
 
 **This is the most important task in the plan.** Every false positive the system will ever produce is prevented here or not at all.
 
+> **Amended during implementation, after checking the operator's actual setup.**
+> The original cooldown design assumed a post-match replay showing a real KO, and made
+> CHAR_SELECT the only exit. Both assumptions were wrong for this operator: there is rarely a
+> post-match replay (just a win screen and a rematch menu), and **players rematch without
+> passing through character select**. As written, the detector would fire on game 1 and then sit
+> wedged in cooldown until the safety valve, missing game 2 of every set.
+>
+> The reliable between-games signal is that **round markers reset to 0-0 when a new game
+> starts**. So cooldown now exits on any of:
+> 1. `CHAR_SELECT` (still valid when it does appear),
+> 2. **`agreement_frames` consecutive `IN_MATCH` observations reporting zero round wins for
+>    both sides** — a fresh game, and unambiguous proof the previous one is over,
+> 3. the `cooldown_max_seconds` safety valve (unchanged, now a genuine last resort).
+>
+> Exit 2 is safe against the win screen because that screen has no health bar, so the detector
+> reports `UNKNOWN` rather than `IN_MATCH`. It requires the detector to publish round counts in
+> `Observation.details` as `p1_rounds` / `p2_rounds` (see Task 16). A detector that publishes
+> neither simply never uses exit 2 and falls back to 1 and 3.
+>
+> Additionally, the streak is now **time-bounded**. UNKNOWN frames neither break nor extend a
+> run of agreeing MATCH_END frames, which taken literally left the streak with no temporal
+> locality at all: two match-end reads, a ten-minute gap of UNKNOWN, and one more read would
+> fire an event. A partial streak older than `streak_staleness_seconds` is discarded.
+
 State machine:
 
 ```
@@ -4393,6 +4417,14 @@ from dataclasses import dataclass
 from ..types import EventType, Frame, Game, Observation, Screen, Side
 from .roi import Roi, fill_ratio
 
+
+> **Amended during implementation.** `observe()` must publish the number of lit round markers
+> per side into `Observation.details` as `{"p1_rounds": "<n>", "p2_rounds": "<n>"}` (string
+> values, matching `details`' type) on every `IN_MATCH` and `MATCH_END` observation. The
+> Confirmer uses a confirmed 0-0 reading to detect that a new game has started, which is how
+> cooldown is released when players rematch without passing through character select — the
+> normal case at this operator's events. Publishing counts on MATCH_END too keeps the value
+> meaningful for future consumers.
 
 @dataclass(frozen=True)
 class MarkerLayout:
