@@ -5,7 +5,7 @@ import pytest
 
 from fgc_detector.confirmer import Confirmer, ConfirmerConfig
 from fgc_detector.server import EventServer
-from fgc_detector.types import ConfirmerState, Game, Side
+from fgc_detector.types import ConfirmerState, EventType, Game, RuntimeSettings, Side
 
 TS = datetime(2026, 7, 21, 20, 0, 0, tzinfo=timezone.utc)
 
@@ -35,8 +35,18 @@ class FakeSocket:
 @pytest.fixture
 def server():
     confirmer = Confirmer(Game.SF6, ConfirmerConfig())
+    settings = RuntimeSettings(
+        active_game=Game.SF6,
+        enabled_games=frozenset({Game.SF6, Game.TEKKEN8}),
+        enabled_events=frozenset({EventType.MATCH_END}),
+    )
     return EventServer(
-        confirmer=confirmer, host="127.0.0.1", port=0, obs_connected_getter=lambda: True
+        confirmer=confirmer,
+        host="127.0.0.1",
+        port=0,
+        obs_connected_getter=lambda: True,
+        settings=settings,
+        on_settings_changed=lambda _s: None,
     )
 
 
@@ -55,7 +65,8 @@ async def test_arm_command_arms_the_confirmer_and_echoes_status(server):
     socket = FakeSocket(['{"cmd":"arm"}'])
     await server.handle_client(socket)
     assert server.confirmer.armed is True
-    assert socket.payloads()[-1]["armed"] is True
+    status = [item for item in socket.payloads() if item["type"] == "status"][-1]
+    assert status["armed"] is True
 
 
 @pytest.mark.asyncio
@@ -71,7 +82,8 @@ async def test_set_game_command_switches_game(server):
     socket = FakeSocket(['{"cmd":"set_game","game":"tekken8"}'])
     await server.handle_client(socket)
     assert server.confirmer.game is Game.TEKKEN8
-    assert socket.payloads()[-1]["game"] == "tekken8"
+    status = [item for item in socket.payloads() if item["type"] == "status"][-1]
+    assert status["game"] == "tekken8"
 
 
 @pytest.mark.asyncio

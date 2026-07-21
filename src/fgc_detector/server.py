@@ -10,21 +10,28 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 import websockets
 
 from .confirmer import Confirmer
+from .detectors.registry import available_games, get_detector
 from .events import (
     ArmCommand,
     CommandError,
+    ConfigEvent,
     DisarmCommand,
     Event,
+    GetConfigCommand,
+    SetEnabledEventsCommand,
+    SetEnabledGamesCommand,
     SetGameCommand,
     StatusEvent,
     parse_command,
 )
+from .types import RuntimeSettings
 
 log = logging.getLogger(__name__)
 
@@ -36,11 +43,15 @@ class EventServer:
         host: str,
         port: int,
         obs_connected_getter: Callable[[], bool],
+        settings: RuntimeSettings,
+        on_settings_changed: Callable[[RuntimeSettings], None],
     ) -> None:
         self.confirmer = confirmer
         self._host = host
         self._port = port
         self._obs_connected = obs_connected_getter
+        self.settings = settings
+        self._on_settings_changed = on_settings_changed
         self._clients: set[Any] = set()
 
     def status_event(self, now: datetime) -> StatusEvent:
@@ -52,7 +63,31 @@ class EventServer:
             ts=now,
         )
 
+    def config_event(self, now: datetime) -> ConfigEvent:
+        games = available_games()
+        supported_events = (
+            frozenset().union(*(get_detector(game).supported_events() for game in games))
+            if games
+            else frozenset()
+        )
+        return ConfigEvent(
+            settings=self.settings,
+            available_games=games,
+            supported_events=supported_events,
+            ts=now,
+        )
+
+    def _apply(self, settings: RuntimeSettings) -> None:
+        """Adopt new settings, sync the confirmer, and persist."""
+        self.settings = settings
+        if self.confirmer.game is not settings.active_game:
+            self.confirmer.set_game(settings.active_game)
+        self._on_settings_changed(settings)
+
     async def broadcast(self, event: Event) -> None:
+        if not self.settings.allows(event.TYPE):
+            log.debug("suppressing %s: disabled by runtime settings", event.TYPE.value)
+            return
         message = event.to_json()
         for client in list(self._clients):
             try:
@@ -68,6 +103,7 @@ class EventServer:
         self._clients.add(socket)
         try:
             await self._send_status(socket)
+            await socket.send(self.config_event(datetime.now(timezone.utc)).to_json())
             async for raw in socket:
                 await self._handle_message(socket, raw)
         finally:
@@ -81,15 +117,27 @@ class EventServer:
             await socket.send(json.dumps({"error": str(exc)}))
             return
 
-        match command:
-            case ArmCommand():
-                self.confirmer.arm()
-            case DisarmCommand():
-                self.confirmer.disarm()
-            case SetGameCommand(game=game):
-                self.confirmer.set_game(game)
+        now = datetime.now(timezone.utc)
+        try:
+            match command:
+                case ArmCommand():
+                    self.confirmer.arm()
+                case DisarmCommand():
+                    self.confirmer.disarm()
+                case SetGameCommand(game=game):
+                    self._apply(replace(self.settings, active_game=game))
+                case GetConfigCommand():
+                    pass
+                case SetEnabledGamesCommand(games=games):
+                    self._apply(replace(self.settings, enabled_games=games))
+                case SetEnabledEventsCommand(events=events):
+                    self._apply(replace(self.settings, enabled_events=events))
+        except ValueError as exc:
+            await socket.send(json.dumps({"error": str(exc)}))
+            return
 
         await self._send_status(socket)
+        await socket.send(self.config_event(now).to_json())
 
     async def serve(self) -> None:
         log.info("event server listening on ws://%s:%s", self._host, self._port)

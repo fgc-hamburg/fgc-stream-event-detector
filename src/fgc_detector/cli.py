@@ -16,7 +16,7 @@ from pathlib import Path
 
 import cv2
 
-from .config import ConfigError, load_config
+from .config import ConfigError, load_config, save_config
 from .confirmer import Confirmer, ConfirmerConfig
 from .detectors.registry import UnknownGameError, get_detector
 from .frames.obs import ObsFrameSource, default_client_factory
@@ -24,7 +24,7 @@ from .frames.offline import VideoFrameSource
 from .observability import FireRecorder
 from .pipeline import run_offline
 from .server import EventServer
-from .types import Game
+from .types import Game, RuntimeSettings
 
 log = logging.getLogger(__name__)
 
@@ -224,11 +224,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
         canonical=detector.canonical_size,
         poll_hz=config.obs.poll_hz,
     )
+    def persist(settings: RuntimeSettings) -> None:
+        try:
+            save_config(args.config, config.with_runtime(settings))
+        except OSError as exc:
+            # A read-only config file must not take the detector down mid-set.
+            log.error("could not persist settings: %s", exc)
+
     server = EventServer(
         confirmer=confirmer,
         host=config.server.host,
         port=config.server.port,
         obs_connected_getter=lambda: source.connected,
+        settings=config.runtime,
+        on_settings_changed=persist,
     )
     recorder = FireRecorder(Path("evidence"))
 
