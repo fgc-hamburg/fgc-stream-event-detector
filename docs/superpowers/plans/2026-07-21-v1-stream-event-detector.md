@@ -1546,8 +1546,12 @@ git commit -m "feat: detector protocol and registry"
 > The reliable between-games signal is that **round markers reset to 0-0 when a new game
 > starts**. So cooldown now exits on any of:
 > 1. `CHAR_SELECT` (still valid when it does appear),
-> 2. **`agreement_frames` consecutive `IN_MATCH` observations reporting zero round wins for
->    both sides** — a fresh game, and unambiguous proof the previous one is over,
+> 2. **`agreement_frames` `IN_MATCH` observations reporting zero round wins for both sides** — a
+>    fresh game, and proof the previous one is over. This counter is handled symmetrically with
+>    the MATCH_END streak: `UNKNOWN` frames neither break nor extend it (they are common during
+>    transitions, and clearing on every flicker would stall the release exactly when it is needed
+>    most), and it is bounded by `streak_staleness_seconds` so a capture stall cannot bridge two
+>    distant readings,
 > 3. the `cooldown_max_seconds` safety valve (unchanged, now a genuine last resort).
 >
 > Exit 2 is safe against the win screen because that screen has no health bar, so the detector
@@ -4419,8 +4423,12 @@ from .roi import Roi, fill_ratio
 
 
 > **Amended during implementation.** `observe()` must publish the number of lit round markers
-> per side into `Observation.details` as `{"p1_rounds": "<n>", "p2_rounds": "<n>"}` (string
-> values, matching `details`' type) on every `IN_MATCH` and `MATCH_END` observation. The
+> per side into `Observation.details`, keyed by the shared constants `DETAIL_P1_ROUNDS` and
+> `DETAIL_P2_ROUNDS` exported from `types.py` — **never by writing the string literals**. The
+> Confirmer reads the same constants. These two files are the only producer and consumer of that
+> contract, and a one-character drift between them would silently reinstate the missed-game-2 bug
+> with every test still passing, because nothing else checks that they agree. Values are strings,
+> matching `details`' declared type on every `IN_MATCH` and `MATCH_END` observation. The
 > Confirmer uses a confirmed 0-0 reading to detect that a new game has started, which is how
 > cooldown is released when players rematch without passing through character select — the
 > normal case at this operator's events. Publishing counts on MATCH_END too keeps the value
