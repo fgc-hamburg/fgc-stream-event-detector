@@ -20,6 +20,10 @@ def _char_select() -> Observation:
     return Observation(screen=Screen.CHAR_SELECT)
 
 
+def _in_match_rounds(p1: str, p2: str) -> Observation:
+    return Observation(screen=Screen.IN_MATCH, details={"p1_rounds": p1, "p2_rounds": p2})
+
+
 class Driver:
     """Feeds observations to a Confirmer on a deterministic clock."""
 
@@ -176,6 +180,90 @@ def test_unknown_screens_do_not_disturb_a_live_match(driver):
     assert driver.confirmer.state is ConfirmerState.LIVE
     driver.feed(_match_end(Side.P1), 3)
     assert len(driver.events) == 1
+
+
+def test_unknown_frames_interleaved_within_a_streak_do_not_break_it(driver):
+    """UNKNOWN must be ignored even mid-streak, not just before one starts.
+
+    Feeding UNKNOWN only before the streak begins can't distinguish "UNKNOWN is
+    ignored" from "UNKNOWN clears an (already empty) streak". Interleaving it
+    between agreeing MATCH_END frames is the real test.
+    """
+    driver.feed(_in_match(), 5)
+    driver.feed(_match_end(Side.P1), 1)
+    driver.feed(Observation(Screen.UNKNOWN), 1)
+    driver.feed(_match_end(Side.P1), 1)
+    driver.feed(Observation(Screen.UNKNOWN), 1)
+    driver.feed(_match_end(Side.P1), 1)
+    assert len(driver.events) == 1
+
+
+def test_missed_game_2_regression_cooldown_releases_on_zero_zero_rounds(driver):
+    """The bug this fix exists for: rematches skip CHAR_SELECT.
+
+    Game 1 ends, cooldown begins. The operator confirmed CHAR_SELECT is often
+    never seen between games of a set. Once round counters agree at 0-0 for
+    `agreement_frames` consecutive IN_MATCH frames, cooldown must release so
+    game 2 can be detected -- without this, the detector wedges until the
+    180s safety valve and misses game 2 entirely.
+    """
+    driver.feed(_in_match(), 5).feed(_match_end(Side.P1), 3)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+    driver.feed(_in_match_rounds("0", "0"), 3)
+    assert driver.confirmer.state is ConfirmerState.IDLE
+
+    driver.feed(_in_match(), 5).feed(_match_end(Side.P2), 3)
+    assert len(driver.events) == 2
+    assert driver.events[1].winner is Side.P2
+
+
+def test_single_zero_zero_frame_does_not_release_cooldown(driver):
+    driver.feed(_in_match(), 5).feed(_match_end(Side.P1), 3)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+    driver.feed(_in_match_rounds("0", "0"), 1)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+
+def test_nonzero_rounds_do_not_release_cooldown(driver):
+    driver.feed(_in_match(), 5).feed(_match_end(Side.P1), 3)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+    driver.feed(_in_match_rounds("2", "0"), 5)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+
+def test_missing_or_unparseable_round_details_do_not_release_cooldown_or_raise(driver):
+    driver.feed(_in_match(), 5).feed(_match_end(Side.P1), 3)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+    driver.feed(_in_match(), 5)  # no details at all (e.g. NullDetector)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+    driver.feed(Observation(screen=Screen.IN_MATCH, details={"p1_rounds": "oops", "p2_rounds": "0"}), 5)
+    assert driver.confirmer.state is ConfirmerState.COOLDOWN
+
+
+def test_stale_partial_streak_does_not_fire(driver):
+    driver.feed(_in_match(), 5)
+    driver.feed(_match_end(Side.P1), 2)
+    driver.advance(600)  # ten minutes later, well past streak_staleness_seconds
+    driver.feed(_match_end(Side.P1), 1)
+    assert driver.events == []
+
+
+def test_streak_within_staleness_window_still_fires(driver):
+    driver.feed(_in_match(), 5)
+    driver.feed(_match_end(Side.P1), 2)
+    driver.advance(1)  # within the default 3s staleness window
+    driver.feed(_match_end(Side.P1), 1)
+    assert len(driver.events) == 1
+
+
+def test_streak_staleness_seconds_must_be_positive():
+    with pytest.raises(ValueError):
+        ConfirmerConfig(streak_staleness_seconds=0)
 
 
 def test_match_end_without_a_winner_is_ignored(driver):

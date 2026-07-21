@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 class ConfirmerConfig:
     agreement_frames: int = 3
     cooldown_max_seconds: float = 180.0
+    streak_staleness_seconds: float = 3.0
 
     def __post_init__(self) -> None:
         if self.agreement_frames < 1:
@@ -31,6 +32,11 @@ class ConfirmerConfig:
             raise ValueError(
                 f"cooldown_max_seconds must be > 0, got {self.cooldown_max_seconds}"
             )
+        if self.streak_staleness_seconds <= 0:
+            raise ValueError(
+                f"streak_staleness_seconds must be > 0, got "
+                f"{self.streak_staleness_seconds}"
+            )
 
 
 class Confirmer:
@@ -40,7 +46,9 @@ class Confirmer:
         self._armed = False
         self._state = ConfirmerState.IDLE
         self._streak: list[Observation] = []
+        self._streak_last_ts: datetime | None = None
         self._cooldown_started: datetime | None = None
+        self._zero_streak: list[Observation] = []
 
     @property
     def state(self) -> ConfirmerState:
@@ -70,7 +78,9 @@ class Confirmer:
     def _reset(self) -> None:
         self._state = ConfirmerState.IDLE
         self._streak.clear()
+        self._streak_last_ts = None
         self._cooldown_started = None
+        self._zero_streak.clear()
 
     def observe(self, observation: Observation, now: datetime) -> MatchEndEvent | None:
         """Feed one observation. Returns an event only when one is confirmed."""
@@ -109,9 +119,16 @@ class Confirmer:
             # one either.
             return None
 
-        if self._streak and self._streak[-1].payload != observation.payload:
-            self._streak.clear()
+        if self._streak:
+            stale = (
+                self._streak_last_ts is not None
+                and now - self._streak_last_ts
+                > timedelta(seconds=self._config.streak_staleness_seconds)
+            )
+            if self._streak[-1].payload != observation.payload or stale:
+                self._streak.clear()
         self._streak.append(observation)
+        self._streak_last_ts = now
 
         if len(self._streak) < self._config.agreement_frames:
             return None
@@ -121,6 +138,7 @@ class Confirmer:
         self._state = ConfirmerState.COOLDOWN
         self._cooldown_started = now
         self._streak.clear()
+        self._streak_last_ts = None
         log.info(
             "confirmed match_end game=%s winner=%s confidence=%.4f",
             self._game.value,
@@ -131,18 +149,52 @@ class Confirmer:
             game=self._game, winner=winner, confidence=confidence, ts=now
         )
 
+    @staticmethod
+    def _is_fresh_game_start(observation: Observation) -> bool:
+        """True if this frame reports both round-win counters reset to 0-0.
+
+        Round counters reset to 0-0 at the start of every game, including
+        rematches that skip character select entirely. Missing or
+        unparseable values are treated as "not a fresh game" rather than
+        raising: a detector that never publishes these keys (NullDetector)
+        must behave exactly as it did before this exit existed.
+        """
+        if observation.screen is not Screen.IN_MATCH:
+            return False
+        details = observation.details
+        p1_raw = details.get("p1_rounds")
+        p2_raw = details.get("p2_rounds")
+        if p1_raw is None or p2_raw is None:
+            return False
+        try:
+            return int(p1_raw) == 0 and int(p2_raw) == 0
+        except ValueError:
+            return False
+
     def _observe_cooldown(self, observation: Observation, now: datetime) -> None:
-        """Hold until a definitive between-games screen.
+        """Hold until a definitive between-games signal.
 
         Deliberately does not exit on elapsed time alone: the post-match replay
         shows real gameplay and a real KO, so a time-based exit would re-arm
-        mid-replay and fire on the replayed KO. CHAR_SELECT is the only signal
-        that unambiguously means "the previous game is over". The safety valve
-        below prevents a missed CHAR_SELECT from wedging the detector forever.
+        mid-replay and fire on the replayed KO. Two signals unambiguously mean
+        "the previous game is over": CHAR_SELECT, and round counters reading
+        0-0 for `agreement_frames` consecutive IN_MATCH observations (players
+        routinely rematch without ever passing through character select, so
+        CHAR_SELECT alone would wedge the detector until the safety valve).
+        The safety valve below prevents a missed signal from wedging the
+        detector forever.
         """
         if observation.screen is Screen.CHAR_SELECT:
             self._reset()
             return None
+
+        if self._is_fresh_game_start(observation):
+            self._zero_streak.append(observation)
+            if len(self._zero_streak) >= self._config.agreement_frames:
+                self._reset()
+                return None
+        else:
+            self._zero_streak.clear()
 
         if self._cooldown_started is not None:
             elapsed = now - self._cooldown_started
