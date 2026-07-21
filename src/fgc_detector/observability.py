@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-from itertools import count
 from pathlib import Path
 
 import cv2
@@ -23,26 +22,63 @@ log = logging.getLogger(__name__)
 class FireRecorder:
     def __init__(self, output_dir: Path) -> None:
         self._dir = Path(output_dir)
-        self._counter = count()
 
     def record(
         self, event: MatchEndEvent, frame: Frame, observation: Observation
-    ) -> Path:
-        """Write the triggering frame and its scores. Returns the PNG's path."""
-        self._dir.mkdir(parents=True, exist_ok=True)
+    ) -> Path | None:
+        """Write the triggering frame and its scores.
 
-        stamp = event.ts.strftime("%Y-%m-%dT%H-%M-%S")
-        name = f"{stamp}_{event.game.value}_{event.winner.value}_{next(self._counter):03d}"
-        png_path = self._dir / f"{name}.png"
+        Returns the PNG's path, or None if evidence could not be written.
+        Recording evidence must never break event emission, so every failure
+        here is caught and logged rather than raised.
+        """
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
 
-        cv2.imwrite(str(png_path), frame.image)
-        sidecar = {
-            "event": event.to_dict(),
-            "screen": observation.screen.name,
-            "confidence": observation.confidence,
-            "details": dict(observation.details),
-            "debug": dict(observation.debug),
-        }
-        png_path.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
+            stamp = event.ts.strftime("%Y-%m-%dT%H-%M-%S")
+            base = f"{stamp}_{event.game.value}_{event.winner.value}"
+            png_path = self._unused_path(base)
+
+            try:
+                wrote = cv2.imwrite(str(png_path), frame.image)
+            except Exception:
+                log.error(
+                    "failed to write fire evidence image %s", png_path, exc_info=True
+                )
+                return None
+            if not wrote:
+                log.error("cv2.imwrite reported failure writing %s", png_path)
+                return None
+
+            sidecar = {
+                "event": event.to_dict(),
+                "screen": observation.screen.name,
+                "confidence": observation.confidence,
+                "details": dict(observation.details),
+                "debug": dict(observation.debug),
+            }
+            png_path.with_suffix(".json").write_text(json.dumps(sidecar, indent=2))
+        except OSError:
+            log.error(
+                "failed to record fire evidence in %s", self._dir, exc_info=True
+            )
+            return None
+
         log.info("recorded fire evidence: %s", png_path)
         return png_path
+
+    def _unused_path(self, base: str) -> Path:
+        """Pick a PNG path under base that does not already exist on disk.
+
+        A counter kept on the instance is not enough: a fresh FireRecorder
+        (e.g. after a process restart) starts counting from zero again, so it
+        could pick a name a previous instance already used and silently
+        overwrite that earlier evidence. Checking the filesystem holds across
+        separate instances pointed at the same directory.
+        """
+        n = 0
+        while True:
+            candidate = self._dir / f"{base}_{n:03d}.png"
+            if not candidate.exists():
+                return candidate
+            n += 1

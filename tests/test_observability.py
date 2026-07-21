@@ -68,3 +68,50 @@ def test_two_fires_in_the_same_second_do_not_collide(tmp_path):
     first = recorder.record(_event(), _frame(), _observation())
     second = recorder.record(_event(), _frame(), _observation())
     assert first != second
+
+
+def test_two_recorder_instances_do_not_collide_across_a_restart(tmp_path):
+    # Simulates a process restart: a brand-new FireRecorder, with its own
+    # fresh in-memory counter, pointed at a directory that already holds
+    # evidence from a previous instance with the same event timestamp.
+    first = FireRecorder(tmp_path).record(_event(), _frame(), _observation())
+    second = FireRecorder(tmp_path).record(_event(), _frame(), _observation())
+
+    assert first is not None
+    assert second is not None
+    assert first != second
+    assert first.exists()
+    assert second.exists()
+    assert first.with_suffix(".json").exists()
+    assert second.with_suffix(".json").exists()
+
+
+def test_failed_image_write_returns_none_and_logs_without_raising(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(cv2, "imwrite", lambda *args, **kwargs: False)
+    with caplog.at_level("ERROR"):
+        result = FireRecorder(tmp_path).record(_event(), _frame(), _observation())
+
+    assert result is None
+    assert any(
+        record.levelname == "ERROR" for record in caplog.records
+    ), "expected an ERROR log on write failure"
+    # No PNG or sidecar left behind (nothing to leave, imwrite reported failure).
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_unwritable_output_directory_returns_none_and_does_not_raise(
+    tmp_path, caplog
+):
+    target = tmp_path / "fires"
+    target.mkdir()
+    target.chmod(0o400)  # read-only: mkdir(exist_ok=True) succeeds, writes fail
+    try:
+        with caplog.at_level("ERROR"):
+            result = FireRecorder(target).record(_event(), _frame(), _observation())
+    finally:
+        target.chmod(0o700)  # restore so tmp_path cleanup can remove it
+
+    assert result is None
+    assert any(record.levelname == "ERROR" for record in caplog.records)
