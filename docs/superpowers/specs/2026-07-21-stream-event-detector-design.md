@@ -176,6 +176,17 @@ Dashboard → detector:
 `status` is emitted on every state change and on connect, so a freshly-connected dashboard knows
 where things stand without polling. The detector has no concept of a bracket, a set, or a score.
 
+**Every value in a closed set is an enum in Python, never a bare string.** Event types, game keys,
+sides, inbound commands and Confirmer states are all `StrEnum` members; `Screen` is a plain `Enum`
+because it never crosses the wire. Strings exist only at the JSON boundary, where serialization
+reads `.value` and deserialization parses back into the enum, rejecting unknown members explicitly
+rather than propagating an unrecognized string inward.
+
+This matters more than it looks. A typo in a bare `"match_end"` literal produces an event the
+dashboard silently ignores, which is indistinguishable on stream from the detector simply not
+firing — the same silent-and-confident failure mode called out in *Failure handling*. A closed
+enum turns that into an error at the point of the mistake.
+
 ### Configuration
 
 A single config file covering: OBS host/port/password, the game-capture source name, poll rate,
