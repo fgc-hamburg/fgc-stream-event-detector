@@ -665,7 +665,17 @@ git commit -m "feat: frame normalization with aspect-ratio rejection"
 
 **Interfaces:**
 - Consumes: `Frame` from `types.py`; `normalize` from `frames/normalize.py`.
-- Produces: `FrameSource` protocol with `frames() -> Iterator[Frame]` and `close() -> None`; `FolderFrameSource(path, canonical)`; `VideoFrameSource(path, canonical, sample_every=1)`.
+- Produces: `FrameSource` protocol with `frames() -> Iterator[Frame]` and `close() -> None`; `FolderFrameSource(path, canonical)`; `VideoFrameSource(path, canonical, sample_every=1, start_time=None)`.
+
+> **Amended during implementation.** `VideoFrameSource` derives `captured_at` from the frame's
+> position in the video (`start_time + index/fps`, defaulting `start_time` to the Unix epoch so a
+> timestamp's clock portion reads as the offset into the VOD), rather than the wall clock shown in
+> the sample code below. Wall-clock stamps would have broken two things this plan promises: the
+> `replay` timeline could not be correlated against the VOD by hand, and the Confirmer's
+> time-based cooldown safety valve would never fire during a fast replay — so replay would
+> silently exercise different code paths than a live stream. `FolderFrameSource` keeps wall-clock
+> stamps: a folder of stills has no inherent timeline. The video source also warns, rather than
+> staying silent, when it drops a wrong-aspect frame.
 
 - [ ] **Step 1: Write the failing test**
 
