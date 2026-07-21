@@ -18,6 +18,18 @@
 - **No test may require OBS, a GPU, a network, or a real clock.** All time is injected.
 - **Every fire logs its full `debug` mapping and writes the triggering frame to disk.** A HUD restyle after a game patch breaks fixed ROIs silently; logged confidence is the only way to see the drift coming.
 - Package root is `src/fgc_detector/`. Tests mirror it under `tests/`.
+- **A test that cannot fail is worse than no test.** This has been the single most common defect
+  found in review: a fallback test whose expected value equalled the real one, a replay test whose
+  frames omitted a field real code always sets, two CLI tests that exited through an unrelated
+  error branch and never reached the handling they were named for. Each looked green and guarded
+  nothing. For every regression test, state what change would make it fail — and for tests
+  guarding a specific defect, actually reintroduce that defect, watch the test fail, and restore.
+- **Never let two files agree on a bare string.** A key, placeholder, or wire token shared between
+  a producer and a consumer must be a named constant both import. Drift between them is silent and
+  survives a green suite — see `DETAIL_P1_ROUNDS` in `types.py`.
+- **This plan's code blocks age.** Tasks 8, 10 and 12 were amended after later briefs were written.
+  Before modifying an existing file, read what is actually in the tree; the plan shows intent, the
+  repository shows truth. Where they disagree, the repository wins and the plan gets corrected.
 
 ---
 
@@ -3053,6 +3065,17 @@ git commit -m "feat: pipeline and CLI with run/capture/roi/replay"
 
 ---
 
+> **Task 12 amended during implementation.** Review found three defects in the code above:
+> `pump()`'s status-change signature omitted `confirmer.game` though `status_event` publishes it
+> (so a `set_game` leaving the confirmer IDLE — the normal case between matches — broadcast
+> nothing and the dashboard showed a stale game); `_cmd_run` had no shutdown path, because the
+> frame generator is an uninterruptible `while True` on the executor and `source.close()` does not
+> stop it (`_ensure_client` reconnects), so Ctrl-C could hang the process; and `pump()` had no
+> error containment, so one exception tore down `asyncio.gather` and killed the WebSocket server
+> with no notice to connected clients. All three are corrected in the repository.
+
+---
+
 ### Task 13: Runtime settings and the configuration protocol
 
 **Files:**
@@ -3065,6 +3088,20 @@ git commit -m "feat: pipeline and CLI with run/capture/roi/replay"
 **Interfaces:**
 - Consumes: everything from Tasks 1, 2, 7, 10.
 - Produces: `EventType.CONFIG`; `Command.GET_CONFIG`, `Command.SET_ENABLED_GAMES`, `Command.SET_ENABLED_EVENTS`; `ConfigEvent`; `GetConfigCommand`, `SetEnabledGamesCommand(games)`, `SetEnabledEventsCommand(events)`; `RuntimeSettings(active_game, enabled_games, enabled_events)`; `available_games() -> list[Game]`; `Detector.supported_events()`; `save_config(path, config)`.
+
+> **Required by review findings from earlier tasks:**
+> - `parse_command`'s `match` block currently has no `case _:`. **This task adds three new
+>   `Command` members**, which is exactly when a silent fallthrough to `None` would appear. Add
+>   `case _: raise AssertionError(f"unhandled command {command}")` so a future member fails loudly
+>   rather than returning a sentinel the caller misreads as success.
+> - The registry save/clear/restore fixture currently lives inside `tests/detectors/test_registry.py`.
+>   This task is the second module to need it and Tasks 14 and 17 are the third and fourth. **Hoist
+>   it into `tests/conftest.py`** rather than copying it — three copies of a global-state fixture is
+>   how order-dependent failures are born.
+> - `types.py`, `events.py` and `config.py` have all changed since this task's code was written
+>   (`DETAIL_P1_ROUNDS`/`DETAIL_P2_ROUNDS` constants, `ConfirmerConfig.streak_staleness_seconds`,
+>   `ServerConfig`, section-type validation). Read each file before editing it and preserve what is
+>   there; the blocks below show the additions, not the whole file.
 
 **Design note:** only one game can be on screen at a time, so `enabled_games` is the *roster the operator picks from* — not a set of detectors running concurrently. `active_game` is the one being sampled. Filtering events by type is nearly vacuous in v1 (there is one event type), but the mechanism is built now so that the UI populates itself from `Detector.supported_events()` when a second event type lands, rather than needing a UI change.
 
@@ -3875,6 +3912,14 @@ git commit -m "feat: serve and persist runtime settings over the websocket"
 - Consumes: `ServerConfig`.
 - Produces: `serve_ui(host, port, ws_port) -> threading.Thread`; a static page at `/`.
 
+> **Required by review findings from earlier tasks:** `__WS_PORT__` is a bare string shared
+> between `ui/http.py` and `ui/index.html` — the same producer/consumer contract that had to be
+> fixed for the round-count detail keys. If the placeholder is renamed in one file, substitution
+> silently no-ops and the page ships pointing at a port named `__WS_PORT__`, failing only in a
+> browser where no test looks. Make it a module constant, and **add a test asserting the served
+> page contains the real port and no longer contains the placeholder** — that test is the only
+> thing standing between a rename and a page that cannot connect.
+
 **Design note:** the HTTP server serves exactly one static file and has no API of its own. The page is just another WebSocket client speaking the protocol from Tasks 2, 13 and 14 — so there is one protocol to maintain, and anything the page can do the dashboard can do too. The page is served on `ui_port` (default `server.port + 1`) because mixing an HTTP router into the WebSocket server buys nothing here.
 
 - [ ] **Step 1: Write the failing test**
@@ -4622,7 +4667,29 @@ Add to `src/fgc_detector/detectors/__init__.py`:
 from . import sf6  # noqa: F401  (registers the SF6 detector)
 ```
 
-- [ ] **Step 3: Write the shared corpus test**
+- [ ] **Step 3: Write an end-to-end test that pins the detector/Confirmer contract**
+
+Add to `tests/detectors/test_game_corpora.py` a test that drives real sample frames through a real
+`Confirmer` — not just `observe()` in isolation:
+
+```python
+def test_a_full_game_sequence_fires_exactly_one_event():
+    """The one test that proves detector and Confirmer actually agree.
+
+    Every other test in this file checks `observe()` in isolation, and the
+    Confirmer's tests use synthetic observations. Neither would notice if the
+    detector published round counts under keys the Confirmer does not read --
+    cooldown would simply never release and the detector would miss game 2 of
+    every set, with a fully green suite. This is the only test that would fail.
+    """
+```
+
+Drive it: several `in_match` samples, then `match_end_p1` samples until an event fires, then
+`in_match` samples again (a fresh game at 0-0), asserting cooldown releases and a second game can
+fire. Use `DETAIL_P1_ROUNDS`/`DETAIL_P2_ROUNDS` from `types.py` for any assertion on published
+details, never string literals.
+
+- [ ] **Step 4: Write the shared corpus test**
 
 Create `tests/detectors/test_game_corpora.py`. This file is parametrized over games; Task 18 adds Tekken 8 to `GAMES` and writes no new test code.
 
@@ -4708,12 +4775,12 @@ def test_replay_samples_never_report_match_end(case):
     assert get_detector(game).observe(_load(game, path)).screen is not Screen.MATCH_END
 ```
 
-- [ ] **Step 4: Run tests to verify they fail**
+- [ ] **Step 5: Run tests to verify they fail**
 
 Run: `uv run pytest tests/detectors/test_game_corpora.py -v`
 Expected: FAIL — the placeholder ROIs classify nothing correctly.
 
-- [ ] **Step 5: Tune until the corpus passes**
+- [ ] **Step 6: Tune until the corpus passes**
 
 Preview what the ROIs are actually sampling:
 
@@ -4726,7 +4793,7 @@ Iterate on coordinates in `SF6_LAYOUT`, then on the three thresholds, until ever
 Run: `uv run pytest tests/detectors/test_game_corpora.py -v`
 Expected: PASS
 
-- [ ] **Step 6: Verify against a full VOD end to end**
+- [ ] **Step 7: Verify against a full VOD end to end**
 
 ```bash
 uv run fgc-detect replay --game sf6 --video <the-vod>.mp4 --evidence-dir /tmp/sf6_evidence
@@ -4734,7 +4801,7 @@ uv run fgc-detect replay --game sf6 --video <the-vod>.mp4 --evidence-dir /tmp/sf
 
 Expected: exactly one `match_end` per game actually played, and none during post-match replays. Compare the printed timeline against the VOD by hand.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/fgc_detector/detectors/sf6.py src/fgc_detector/detectors/__init__.py samples/sf6/ tests/detectors/test_game_corpora.py
