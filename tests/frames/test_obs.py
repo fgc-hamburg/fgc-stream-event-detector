@@ -186,6 +186,27 @@ def test_backoff_resets_after_a_successful_capture():
     assert sleeps[1] == 0.5
 
 
+def test_stop_ends_the_frame_generator():
+    source, _ = _source([_data_uri(), _data_uri(), _data_uri()])
+    frames = source.frames()
+    next(frames)
+    source.stop()
+    with pytest.raises(StopIteration):
+        next(frames)
+
+
+def test_close_also_stops_the_frame_generator():
+    """Regression: close() used to only drop the client, which
+    _ensure_client() would silently rebuild on the generator's next loop
+    iteration — so close() never actually stopped frames()."""
+    source, _ = _source([_data_uri(), _data_uri()])
+    frames = source.frames()
+    next(frames)
+    source.close()
+    with pytest.raises(StopIteration):
+        next(frames)
+
+
 def test_invalid_poll_rate_rejected():
     with pytest.raises(ValueError):
         ObsFrameSource(

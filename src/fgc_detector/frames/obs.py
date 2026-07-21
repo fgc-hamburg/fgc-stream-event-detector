@@ -46,6 +46,7 @@ class ObsFrameSource:
         self._client: object | None = None
         self._connected = False
         self._backoff = 0.5
+        self._stopped = False
 
     @property
     def connected(self) -> bool:
@@ -95,8 +96,18 @@ class ObsFrameSource:
         raw = np.frombuffer(base64.b64decode(payload), dtype=np.uint8)
         return cv2.imdecode(raw, cv2.IMREAD_COLOR)
 
+    def stop(self) -> None:
+        """Signal frames() to stop iterating after its current attempt.
+
+        Cooperative: the generator only checks this between attempts, so it
+        won't interrupt a capture or sleep already in progress. That's the
+        best a synchronous, uninterruptible loop can offer, but it's enough
+        to let the loop actually end instead of running forever.
+        """
+        self._stopped = True
+
     def frames(self) -> Iterator[Frame]:
-        while True:
+        while not self._stopped:
             frame = self._attempt_once()
             if frame is not None:
                 yield frame
@@ -110,6 +121,7 @@ class ObsFrameSource:
                 self._backoff = min(self._backoff * 2, _MAX_BACKOFF_SECONDS)
 
     def close(self) -> None:
+        self.stop()
         client = self._client
         self._client = None
         self._connected = False
