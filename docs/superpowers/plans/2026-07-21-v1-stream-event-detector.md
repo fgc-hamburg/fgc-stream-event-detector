@@ -41,8 +41,10 @@
 | `src/fgc_detector/config.py` | TOML config loading |
 | `src/fgc_detector/observability.py` | Fire logging + frame dumping |
 | `src/fgc_detector/cli.py` | `run`, `capture`, `roi`, `replay` subcommands |
+| `src/fgc_detector/ui/http.py` | Static file server for the config page |
+| `src/fgc_detector/ui/index.html` | The config page (a WebSocket client, no API of its own) |
 
-Tasks 1–12 are game-agnostic and fully testable with synthetic data. Tasks 13–14 need real sample media and are deliberately last.
+Tasks 1–15 are game-agnostic and fully testable with synthetic data. Tasks 16–17 need real sample media and are deliberately last.
 
 ---
 
@@ -3012,7 +3014,1159 @@ git commit -m "feat: pipeline and CLI with run/capture/roi/replay"
 
 ---
 
-### Task 13: Street Fighter 6 detector
+### Task 13: Runtime settings and the configuration protocol
+
+**Files:**
+- Modify: `src/fgc_detector/types.py` (add enum members)
+- Modify: `src/fgc_detector/events.py` (add `ConfigEvent` and three commands)
+- Modify: `src/fgc_detector/detectors/registry.py` (add `supported_events`, `available_games`)
+- Modify: `src/fgc_detector/config.py` (add `[runtime]` section and `save_config`)
+- Test: `tests/test_runtime_settings.py`
+
+**Interfaces:**
+- Consumes: everything from Tasks 1, 2, 7, 10.
+- Produces: `EventType.CONFIG`; `Command.GET_CONFIG`, `Command.SET_ENABLED_GAMES`, `Command.SET_ENABLED_EVENTS`; `ConfigEvent`; `GetConfigCommand`, `SetEnabledGamesCommand(games)`, `SetEnabledEventsCommand(events)`; `RuntimeSettings(active_game, enabled_games, enabled_events)`; `available_games() -> list[Game]`; `Detector.supported_events()`; `save_config(path, config)`.
+
+**Design note:** only one game can be on screen at a time, so `enabled_games` is the *roster the operator picks from* — not a set of detectors running concurrently. `active_game` is the one being sampled. Filtering events by type is nearly vacuous in v1 (there is one event type), but the mechanism is built now so that the UI populates itself from `Detector.supported_events()` when a second event type lands, rather than needing a UI change.
+
+Add `tomli-w>=1.0` to `dependencies` in `pyproject.toml`. Writing TOML by hand looks easy until a source name or password contains a quote or backslash.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_runtime_settings.py`:
+
+```python
+import pytest
+
+from fgc_detector.config import load_config, save_config
+from fgc_detector.detectors.registry import NullDetector, available_games, register
+from fgc_detector.events import (
+    ConfigEvent,
+    CommandError,
+    GetConfigCommand,
+    SetEnabledEventsCommand,
+    SetEnabledGamesCommand,
+    parse_command,
+)
+from fgc_detector.types import EventType, Game, RuntimeSettings
+
+from datetime import datetime, timezone
+
+TS = datetime(2026, 7, 21, 20, 0, 0, tzinfo=timezone.utc)
+
+VALID = """
+game = "sf6"
+
+[obs]
+source_name = "Game Capture"
+
+[runtime]
+enabled_games = ["sf6", "tekken8"]
+enabled_events = ["match_end"]
+"""
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry():
+    from fgc_detector.detectors import registry
+
+    saved = dict(registry._REGISTRY)
+    registry._REGISTRY.clear()
+    yield
+    registry._REGISTRY.clear()
+    registry._REGISTRY.update(saved)
+
+
+def _write(tmp_path, text):
+    path = tmp_path / "config.toml"
+    path.write_text(text)
+    return path
+
+
+def test_new_enum_members_have_stable_values():
+    assert EventType.CONFIG.value == "config"
+
+
+def test_available_games_lists_registered_detectors_only():
+    assert available_games() == []
+    register(NullDetector(Game.TEKKEN8))
+    register(NullDetector(Game.SF6))
+    # Sorted for a stable UI ordering, not registration order.
+    assert available_games() == [Game.SF6, Game.TEKKEN8]
+
+
+def test_null_detector_declares_the_events_it_can_produce():
+    assert NullDetector(Game.SF6).supported_events() == frozenset({EventType.MATCH_END})
+
+
+def test_runtime_settings_rejects_an_active_game_not_in_the_roster():
+    with pytest.raises(ValueError, match="not in enabled_games"):
+        RuntimeSettings(
+            active_game=Game.SF6,
+            enabled_games=frozenset({Game.TEKKEN8}),
+            enabled_events=frozenset({EventType.MATCH_END}),
+        )
+
+
+def test_runtime_settings_rejects_an_empty_roster():
+    with pytest.raises(ValueError, match="at least one"):
+        RuntimeSettings(
+            active_game=Game.SF6,
+            enabled_games=frozenset(),
+            enabled_events=frozenset({EventType.MATCH_END}),
+        )
+
+
+def test_status_is_not_a_filterable_event():
+    # Status is transport bookkeeping; letting an operator disable it would
+    # leave the dashboard blind with no way to recover.
+    with pytest.raises(ValueError, match="cannot be filtered"):
+        RuntimeSettings(
+            active_game=Game.SF6,
+            enabled_games=frozenset({Game.SF6}),
+            enabled_events=frozenset({EventType.STATUS}),
+        )
+
+
+def test_config_event_serializes_capabilities_and_selections():
+    register(NullDetector(Game.SF6))
+    register(NullDetector(Game.TEKKEN8))
+    event = ConfigEvent(
+        settings=RuntimeSettings(
+            active_game=Game.SF6,
+            enabled_games=frozenset({Game.SF6, Game.TEKKEN8}),
+            enabled_events=frozenset({EventType.MATCH_END}),
+        ),
+        available_games=[Game.SF6, Game.TEKKEN8],
+        supported_events=frozenset({EventType.MATCH_END}),
+        ts=TS,
+    )
+    assert event.to_dict() == {
+        "type": "config",
+        "active_game": "sf6",
+        "enabled_games": ["sf6", "tekken8"],
+        "enabled_events": ["match_end"],
+        "available_games": ["sf6", "tekken8"],
+        "supported_events": ["match_end"],
+        "ts": "2026-07-21T20:00:00Z",
+    }
+
+
+def test_parse_get_config():
+    assert parse_command('{"cmd":"get_config"}') == GetConfigCommand()
+
+
+def test_parse_set_enabled_games():
+    command = parse_command('{"cmd":"set_enabled_games","games":["sf6"]}')
+    assert command == SetEnabledGamesCommand(frozenset({Game.SF6}))
+
+
+def test_parse_set_enabled_events():
+    command = parse_command('{"cmd":"set_enabled_events","events":["match_end"]}')
+    assert command == SetEnabledEventsCommand(frozenset({EventType.MATCH_END}))
+
+
+def test_set_enabled_games_rejects_an_unknown_game():
+    with pytest.raises(CommandError, match="unknown game"):
+        parse_command('{"cmd":"set_enabled_games","games":["smash"]}')
+
+
+def test_set_enabled_games_rejects_a_non_list():
+    with pytest.raises(CommandError, match="list"):
+        parse_command('{"cmd":"set_enabled_games","games":"sf6"}')
+
+
+def test_set_enabled_events_rejects_an_unknown_event():
+    with pytest.raises(CommandError, match="unknown event"):
+        parse_command('{"cmd":"set_enabled_events","events":["explode"]}')
+
+
+def test_config_loads_the_runtime_section(tmp_path):
+    config = load_config(_write(tmp_path, VALID))
+    assert config.runtime.active_game is Game.SF6
+    assert config.runtime.enabled_games == frozenset({Game.SF6, Game.TEKKEN8})
+    assert config.runtime.enabled_events == frozenset({EventType.MATCH_END})
+
+
+def test_runtime_section_defaults_to_every_game_and_event(tmp_path):
+    minimal = 'game = "sf6"\n\n[obs]\nsource_name = "Capture"\n'
+    config = load_config(_write(tmp_path, minimal))
+    assert config.runtime.enabled_games == frozenset(Game)
+    assert config.runtime.enabled_events == frozenset({EventType.MATCH_END})
+
+
+def test_save_config_round_trips(tmp_path):
+    path = _write(tmp_path, VALID)
+    config = load_config(path)
+    updated = config.with_runtime(
+        RuntimeSettings(
+            active_game=Game.TEKKEN8,
+            enabled_games=frozenset({Game.TEKKEN8}),
+            enabled_events=frozenset({EventType.MATCH_END}),
+        )
+    )
+    save_config(path, updated)
+    reloaded = load_config(path)
+    assert reloaded.runtime.active_game is Game.TEKKEN8
+    assert reloaded.runtime.enabled_games == frozenset({Game.TEKKEN8})
+    assert reloaded.obs.source_name == "Game Capture", "unrelated settings preserved"
+
+
+def test_save_config_escapes_awkward_strings(tmp_path):
+    path = _write(tmp_path, VALID.replace("Game Capture", 'Weird "Name" \\ Here'))
+    config = load_config(path)
+    save_config(path, config)
+    assert load_config(path).obs.source_name == 'Weird "Name" \\ Here'
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/test_runtime_settings.py -v`
+Expected: FAIL with `ImportError: cannot import name 'RuntimeSettings'`
+
+- [ ] **Step 3: Extend `types.py`**
+
+Add to `src/fgc_detector/types.py` — `EventType` and `Command` gain members, and `RuntimeSettings` is new:
+
+```python
+class EventType(StrEnum):
+    MATCH_END = "match_end"
+    STATUS = "status"
+    CONFIG = "config"
+
+
+class Command(StrEnum):
+    ARM = "arm"
+    DISARM = "disarm"
+    SET_GAME = "set_game"
+    GET_CONFIG = "get_config"
+    SET_ENABLED_GAMES = "set_enabled_games"
+    SET_ENABLED_EVENTS = "set_enabled_events"
+
+
+#: Event types that carry detection results and may therefore be filtered.
+#: STATUS and CONFIG are transport bookkeeping and are always delivered.
+FILTERABLE_EVENTS: frozenset[EventType] = frozenset({EventType.MATCH_END})
+
+
+@dataclass(frozen=True)
+class RuntimeSettings:
+    """What the operator has selected. Validated on construction.
+
+    Only one game is on screen at a time, so `enabled_games` is the roster the
+    operator picks from, not a set of concurrently running detectors.
+    """
+
+    active_game: Game
+    enabled_games: frozenset[Game]
+    enabled_events: frozenset[EventType]
+
+    def __post_init__(self) -> None:
+        if not self.enabled_games:
+            raise ValueError("enabled_games must contain at least one game")
+        if self.active_game not in self.enabled_games:
+            raise ValueError(
+                f"active game {self.active_game.value} is not in enabled_games"
+            )
+        unfilterable = self.enabled_events - FILTERABLE_EVENTS
+        if unfilterable:
+            names = ", ".join(sorted(item.value for item in unfilterable))
+            raise ValueError(f"these event types cannot be filtered: {names}")
+
+    def allows(self, event_type: EventType) -> bool:
+        """Whether an event of this type should be delivered."""
+        if event_type not in FILTERABLE_EVENTS:
+            return True
+        return event_type in self.enabled_events
+```
+
+- [ ] **Step 4: Extend `registry.py`**
+
+Add `supported_events` to the `Detector` protocol and to `NullDetector`, and add `available_games`:
+
+```python
+@runtime_checkable
+class Detector(Protocol):
+    game: Game
+    canonical_size: tuple[int, int]
+
+    def observe(self, frame: Frame) -> Observation:
+        """Classify a single frame. Pure: same frame in, same observation out."""
+        ...
+
+    def rois(self) -> dict[str, Roi]:
+        """The detector's named sampling rectangles, for the `roi` CLI preview."""
+        ...
+
+    def supported_events(self) -> frozenset[EventType]:
+        """Which event types this detector can produce. Drives the config UI."""
+        ...
+
+
+def available_games() -> list[Game]:
+    """Every game with a registered detector, in stable display order."""
+    return sorted(_REGISTRY, key=lambda game: game.value)
+```
+
+And on `NullDetector`:
+
+```python
+    def supported_events(self) -> frozenset[EventType]:
+        return frozenset({EventType.MATCH_END})
+```
+
+Add `EventType` to the module's imports from `..types`.
+
+- [ ] **Step 5: Extend `events.py`**
+
+Add to `src/fgc_detector/events.py`:
+
+```python
+@dataclass(frozen=True)
+class ConfigEvent:
+    """Current selections plus what is available to select. Drives the UI."""
+
+    settings: RuntimeSettings
+    available_games: list[Game]
+    supported_events: frozenset[EventType]
+    ts: datetime
+
+    TYPE: ClassVar[EventType] = EventType.CONFIG
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": self.TYPE.value,
+            "active_game": self.settings.active_game.value,
+            "enabled_games": sorted(item.value for item in self.settings.enabled_games),
+            "enabled_events": sorted(
+                item.value for item in self.settings.enabled_events
+            ),
+            "available_games": [item.value for item in self.available_games],
+            "supported_events": sorted(item.value for item in self.supported_events),
+            "ts": _iso(self.ts),
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
+
+
+Event = MatchEndEvent | StatusEvent | ConfigEvent
+
+
+@dataclass(frozen=True)
+class GetConfigCommand:
+    pass
+
+
+@dataclass(frozen=True)
+class SetEnabledGamesCommand:
+    games: frozenset[Game]
+
+
+@dataclass(frozen=True)
+class SetEnabledEventsCommand:
+    events: frozenset[EventType]
+
+
+ParsedCommand = (
+    ArmCommand
+    | DisarmCommand
+    | SetGameCommand
+    | GetConfigCommand
+    | SetEnabledGamesCommand
+    | SetEnabledEventsCommand
+)
+```
+
+Add a shared list-parsing helper and three new `match` arms in `parse_command`:
+
+```python
+def _parse_enum_list(payload: dict, key: str, enum_type, label: str) -> frozenset:
+    raw = payload.get(key)
+    if not isinstance(raw, list):
+        raise CommandError(f"'{key}' must be a list, got {type(raw).__name__}")
+    parsed = set()
+    for item in raw:
+        try:
+            parsed.add(enum_type(item))
+        except ValueError as exc:
+            raise CommandError(f"unknown {label}: {item!r}") from exc
+    return frozenset(parsed)
+```
+
+```python
+        case Command.GET_CONFIG:
+            return GetConfigCommand()
+        case Command.SET_ENABLED_GAMES:
+            return SetEnabledGamesCommand(
+                _parse_enum_list(payload, "games", Game, "game")
+            )
+        case Command.SET_ENABLED_EVENTS:
+            return SetEnabledEventsCommand(
+                _parse_enum_list(payload, "events", EventType, "event")
+            )
+```
+
+Import `RuntimeSettings` and `EventType` from `.types` at the top of the module.
+
+- [ ] **Step 6: Extend `config.py`**
+
+Add a `runtime` field to `AppConfig`, a `with_runtime` helper, and `save_config`:
+
+```python
+import tomli_w
+
+@dataclass(frozen=True)
+class AppConfig:
+    game: Game
+    obs: ObsConfig
+    server: ServerConfig
+    confirmer: ConfirmerConfig
+    runtime: RuntimeSettings
+
+    def with_runtime(self, runtime: RuntimeSettings) -> "AppConfig":
+        return replace(self, game=runtime.active_game, runtime=runtime)
+```
+
+In `load_config`, after the confirmer section:
+
+```python
+    runtime_section = raw.get("runtime", {})
+    try:
+        enabled_games = (
+            frozenset(Game(item) for item in runtime_section["enabled_games"])
+            if "enabled_games" in runtime_section
+            else frozenset(Game)
+        )
+        enabled_events = (
+            frozenset(EventType(item) for item in runtime_section["enabled_events"])
+            if "enabled_events" in runtime_section
+            else frozenset(FILTERABLE_EVENTS)
+        )
+        runtime = RuntimeSettings(
+            active_game=game,
+            enabled_games=enabled_games,
+            enabled_events=enabled_events,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"invalid [runtime] section: {exc}") from exc
+
+    return AppConfig(
+        game=game, obs=obs, server=server, confirmer=confirmer, runtime=runtime
+    )
+```
+
+And the writer:
+
+```python
+def save_config(path: Path, config: AppConfig) -> None:
+    """Write the whole config back to disk. The file stays hand-editable."""
+    document = {
+        "game": config.runtime.active_game.value,
+        "obs": {
+            "source_name": config.obs.source_name,
+            "host": config.obs.host,
+            "port": config.obs.port,
+            "password": config.obs.password,
+            "poll_hz": config.obs.poll_hz,
+        },
+        "server": {"host": config.server.host, "port": config.server.port},
+        "confirmer": {
+            "agreement_frames": config.confirmer.agreement_frames,
+            "cooldown_max_seconds": config.confirmer.cooldown_max_seconds,
+        },
+        "runtime": {
+            "enabled_games": sorted(item.value for item in config.runtime.enabled_games),
+            "enabled_events": sorted(
+                item.value for item in config.runtime.enabled_events
+            ),
+        },
+    }
+    Path(path).write_text(tomli_w.dumps(document))
+```
+
+Add `from dataclasses import dataclass, replace` and import `EventType`, `FILTERABLE_EVENTS`, `RuntimeSettings` from `.types`.
+
+Also extend `config.example.toml`:
+
+```toml
+[runtime]
+# The roster of games offered in the config UI. Only one is active at a time —
+# only one game is ever on screen.
+enabled_games = ["sf6", "tekken8"]
+# Which detection events are delivered. Status and config events are always
+# delivered and cannot be disabled.
+enabled_events = ["match_end"]
+```
+
+- [ ] **Step 7: Run tests to verify they pass**
+
+Run: `uv run pytest tests/test_runtime_settings.py -v`
+Expected: PASS, 17 passed
+
+- [ ] **Step 8: Fix the tests broken by the `AppConfig` signature change**
+
+Run: `uv run pytest -v`
+Expected: `tests/test_config.py` fails — `AppConfig` now requires `runtime`. Update `tests/test_config.py` to assert the new field is populated, then re-run until green.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add pyproject.toml src/fgc_detector/ config.example.toml tests/
+git commit -m "feat: runtime settings, config protocol, and TOML persistence"
+```
+
+---
+
+### Task 14: Serving and applying runtime settings
+
+**Files:**
+- Modify: `src/fgc_detector/server.py`
+- Modify: `src/fgc_detector/cli.py:_cmd_run`
+- Test: `tests/test_server_config.py`
+
+**Interfaces:**
+- Consumes: `RuntimeSettings`, `ConfigEvent`, the three new commands, `save_config`, `available_games`.
+- Produces: `EventServer(confirmer, host, port, obs_connected_getter, settings, on_settings_changed)` with `config_event(now)`; `broadcast` filtered by `settings.allows(...)`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_server_config.py`:
+
+```python
+import json
+from datetime import datetime, timezone
+
+import pytest
+
+from fgc_detector.confirmer import Confirmer, ConfirmerConfig
+from fgc_detector.detectors.registry import NullDetector, register
+from fgc_detector.events import MatchEndEvent
+from fgc_detector.server import EventServer
+from fgc_detector.types import EventType, Game, RuntimeSettings, Side
+
+TS = datetime(2026, 7, 21, 20, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _registry():
+    from fgc_detector.detectors import registry
+
+    saved = dict(registry._REGISTRY)
+    registry._REGISTRY.clear()
+    register(NullDetector(Game.SF6))
+    register(NullDetector(Game.TEKKEN8))
+    yield
+    registry._REGISTRY.clear()
+    registry._REGISTRY.update(saved)
+
+
+class FakeSocket:
+    def __init__(self, inbound=()):
+        self.sent: list[str] = []
+        self._inbound = list(inbound)
+
+    async def send(self, message: str) -> None:
+        self.sent.append(message)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._inbound:
+            raise StopAsyncIteration
+        return self._inbound.pop(0)
+
+    def payloads(self) -> list[dict]:
+        return [json.loads(message) for message in self.sent]
+
+
+def _settings(**overrides) -> RuntimeSettings:
+    base = {
+        "active_game": Game.SF6,
+        "enabled_games": frozenset({Game.SF6, Game.TEKKEN8}),
+        "enabled_events": frozenset({EventType.MATCH_END}),
+    }
+    return RuntimeSettings(**{**base, **overrides})
+
+
+def _server(settings=None, saves=None):
+    confirmer = Confirmer(Game.SF6, ConfirmerConfig())
+    return EventServer(
+        confirmer=confirmer,
+        host="127.0.0.1",
+        port=0,
+        obs_connected_getter=lambda: True,
+        settings=settings or _settings(),
+        on_settings_changed=(saves.append if saves is not None else lambda _s: None),
+    )
+
+
+async def test_new_client_receives_config_after_status():
+    server = _server()
+    socket = FakeSocket()
+    await server.handle_client(socket)
+    kinds = [item["type"] for item in socket.payloads()]
+    assert kinds[:2] == ["status", "config"]
+
+
+async def test_config_event_lists_available_games_from_the_registry():
+    server = _server()
+    socket = FakeSocket(['{"cmd":"get_config"}'])
+    await server.handle_client(socket)
+    config = [item for item in socket.payloads() if item["type"] == "config"][-1]
+    assert config["available_games"] == ["sf6", "tekken8"]
+    assert config["supported_events"] == ["match_end"]
+
+
+async def test_set_enabled_games_updates_and_persists():
+    saves = []
+    server = _server(saves=saves)
+    socket = FakeSocket(['{"cmd":"set_enabled_games","games":["sf6"]}'])
+    await server.handle_client(socket)
+    assert server.settings.enabled_games == frozenset({Game.SF6})
+    assert saves[-1].enabled_games == frozenset({Game.SF6})
+
+
+async def test_disabling_the_active_game_is_rejected_not_applied():
+    # Dropping the active game from the roster would leave the detector
+    # sampling a game the operator says is not in use.
+    saves = []
+    server = _server(saves=saves)
+    socket = FakeSocket(['{"cmd":"set_enabled_games","games":["tekken8"]}'])
+    await server.handle_client(socket)
+    assert any(item.get("error") for item in socket.payloads())
+    assert server.settings.enabled_games == frozenset({Game.SF6, Game.TEKKEN8})
+    assert saves == []
+
+
+async def test_set_game_to_a_disabled_game_is_rejected():
+    server = _server(settings=_settings(enabled_games=frozenset({Game.SF6})))
+    socket = FakeSocket(['{"cmd":"set_game","game":"tekken8"}'])
+    await server.handle_client(socket)
+    assert any(item.get("error") for item in socket.payloads())
+    assert server.confirmer.game is Game.SF6
+
+
+async def test_set_game_to_an_enabled_game_updates_and_persists():
+    saves = []
+    server = _server(saves=saves)
+    socket = FakeSocket(['{"cmd":"set_game","game":"tekken8"}'])
+    await server.handle_client(socket)
+    assert server.confirmer.game is Game.TEKKEN8
+    assert saves[-1].active_game is Game.TEKKEN8
+
+
+async def test_set_enabled_events_updates_and_persists():
+    saves = []
+    server = _server(saves=saves)
+    socket = FakeSocket(['{"cmd":"set_enabled_events","events":[]}'])
+    await server.handle_client(socket)
+    assert server.settings.enabled_events == frozenset()
+    assert saves[-1].enabled_events == frozenset()
+
+
+async def test_disabled_event_type_is_not_broadcast():
+    server = _server(settings=_settings(enabled_events=frozenset()))
+    socket = FakeSocket()
+    server._clients.add(socket)
+    await server.broadcast(
+        MatchEndEvent(game=Game.SF6, winner=Side.P1, confidence=0.9, ts=TS)
+    )
+    assert [item["type"] for item in socket.payloads()] == []
+
+
+async def test_status_is_broadcast_even_with_all_events_disabled():
+    server = _server(settings=_settings(enabled_events=frozenset()))
+    socket = FakeSocket()
+    server._clients.add(socket)
+    await server.broadcast(server.status_event(TS))
+    assert socket.payloads()[0]["type"] == "status"
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/test_server_config.py -v`
+Expected: FAIL with `TypeError: EventServer.__init__() got an unexpected keyword argument 'settings'`
+
+- [ ] **Step 3: Update `server.py`**
+
+Replace `EventServer.__init__` and add the new handling:
+
+```python
+    def __init__(
+        self,
+        confirmer: Confirmer,
+        host: str,
+        port: int,
+        obs_connected_getter: Callable[[], bool],
+        settings: RuntimeSettings,
+        on_settings_changed: Callable[[RuntimeSettings], None],
+    ) -> None:
+        self.confirmer = confirmer
+        self._host = host
+        self._port = port
+        self._obs_connected = obs_connected_getter
+        self.settings = settings
+        self._on_settings_changed = on_settings_changed
+        self._clients: set[Any] = set()
+
+    def config_event(self, now: datetime) -> ConfigEvent:
+        return ConfigEvent(
+            settings=self.settings,
+            available_games=available_games(),
+            supported_events=frozenset().union(
+                *(
+                    get_detector(game).supported_events()
+                    for game in available_games()
+                )
+            )
+            if available_games()
+            else frozenset(),
+            ts=now,
+        )
+
+    def _apply(self, settings: RuntimeSettings) -> None:
+        """Adopt new settings, sync the confirmer, and persist."""
+        self.settings = settings
+        if self.confirmer.game is not settings.active_game:
+            self.confirmer.set_game(settings.active_game)
+        self._on_settings_changed(settings)
+```
+
+`broadcast` gains a filter as its first line:
+
+```python
+    async def broadcast(self, event: Event) -> None:
+        if not self.settings.allows(event.TYPE):
+            log.debug("suppressing %s: disabled by runtime settings", event.TYPE.value)
+            return
+        message = event.to_json()
+        ...
+```
+
+`handle_client` sends config after status:
+
+```python
+            await self._send_status(socket)
+            await socket.send(self.config_event(datetime.now(timezone.utc)).to_json())
+```
+
+And `_handle_message` gains three arms. Each builds a candidate `RuntimeSettings`; because `RuntimeSettings.__post_init__` validates, an incoherent combination raises `ValueError` and is reported to the client without being applied:
+
+```python
+        now = datetime.now(timezone.utc)
+        try:
+            match command:
+                case ArmCommand():
+                    self.confirmer.arm()
+                case DisarmCommand():
+                    self.confirmer.disarm()
+                case SetGameCommand(game=game):
+                    self._apply(replace(self.settings, active_game=game))
+                case GetConfigCommand():
+                    pass
+                case SetEnabledGamesCommand(games=games):
+                    self._apply(replace(self.settings, enabled_games=games))
+                case SetEnabledEventsCommand(events=events):
+                    self._apply(replace(self.settings, enabled_events=events))
+        except ValueError as exc:
+            await socket.send(json.dumps({"error": str(exc)}))
+            return
+
+        await self._send_status(socket)
+        await socket.send(self.config_event(now).to_json())
+```
+
+Add imports: `from dataclasses import replace`, `from .detectors.registry import available_games, get_detector`, `from .types import RuntimeSettings`, and `ConfigEvent`, `GetConfigCommand`, `SetEnabledEventsCommand`, `SetEnabledGamesCommand` from `.events`.
+
+- [ ] **Step 4: Wire persistence into `_cmd_run`**
+
+In `src/fgc_detector/cli.py`, inside `_cmd_run`, replace the `EventServer(...)` construction:
+
+```python
+    def persist(settings: RuntimeSettings) -> None:
+        try:
+            save_config(args.config, config.with_runtime(settings))
+        except OSError as exc:
+            # A read-only config file must not take the detector down mid-set.
+            log.error("could not persist settings: %s", exc)
+
+    server = EventServer(
+        confirmer=confirmer,
+        host=config.server.host,
+        port=config.server.port,
+        obs_connected_getter=lambda: source.connected,
+        settings=config.runtime,
+        on_settings_changed=persist,
+    )
+```
+
+Add `from .config import ConfigError, load_config, save_config` and `from .types import Game, RuntimeSettings`.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `uv run pytest tests/test_server_config.py -v`
+Expected: PASS, 9 passed
+
+- [ ] **Step 6: Fix the tests broken by the `EventServer` signature change**
+
+Run: `uv run pytest -v`
+Expected: `tests/test_server.py` fails — `EventServer` now requires `settings` and `on_settings_changed`. Update its `server` fixture to pass them, then re-run until green.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/fgc_detector/server.py src/fgc_detector/cli.py tests/
+git commit -m "feat: serve and persist runtime settings over the websocket"
+```
+
+---
+
+### Task 15: The configuration page
+
+**Files:**
+- Create: `src/fgc_detector/ui/index.html`
+- Create: `src/fgc_detector/ui/__init__.py`, `src/fgc_detector/ui/http.py`
+- Modify: `src/fgc_detector/config.py` (add `ServerConfig.ui_port`)
+- Modify: `src/fgc_detector/cli.py:_cmd_run`
+- Test: `tests/test_ui_http.py`
+
+**Interfaces:**
+- Consumes: `ServerConfig`.
+- Produces: `serve_ui(host, port, ws_port) -> threading.Thread`; a static page at `/`.
+
+**Design note:** the HTTP server serves exactly one static file and has no API of its own. The page is just another WebSocket client speaking the protocol from Tasks 2, 13 and 14 — so there is one protocol to maintain, and anything the page can do the dashboard can do too. The page is served on `ui_port` (default `server.port + 1`) because mixing an HTTP router into the WebSocket server buys nothing here.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_ui_http.py`:
+
+```python
+import urllib.error
+import urllib.request
+
+import pytest
+
+from fgc_detector.ui.http import find_free_port, serve_ui
+
+
+@pytest.fixture
+def ui():
+    port = find_free_port()
+    server, thread = serve_ui("127.0.0.1", port, ws_port=6600)
+    yield port
+    server.shutdown()
+    thread.join(timeout=5)
+
+
+def _get(port: int, path: str = "/") -> tuple[int, str]:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as response:
+        return response.status, response.read().decode()
+
+
+def test_serves_the_page_at_root(ui):
+    status, body = _get(ui)
+    assert status == 200
+    assert "<title>" in body
+
+
+def test_page_is_told_which_websocket_port_to_use(ui):
+    _, body = _get(ui)
+    assert "6600" in body, "the ws port must be injected into the page"
+
+
+def test_unknown_path_returns_404(ui):
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        _get(ui, "/nope")
+    assert excinfo.value.code == 404
+
+
+def test_find_free_port_returns_a_usable_port():
+    assert 1024 < find_free_port() < 65536
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/test_ui_http.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'fgc_detector.ui'`
+
+- [ ] **Step 3: Write the HTTP server**
+
+Create `src/fgc_detector/ui/__init__.py` (empty file) and `src/fgc_detector/ui/http.py`:
+
+```python
+"""A deliberately dumb static file server for the config page.
+
+It serves one HTML file and nothing else. Every read and write the page
+performs goes over the WebSocket, so there is exactly one protocol to maintain
+and the page can do nothing the dashboard cannot also do.
+"""
+
+from __future__ import annotations
+
+import logging
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+_PAGE_PATH = Path(__file__).parent / "index.html"
+
+
+def find_free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _build_handler(ws_port: int) -> type[BaseHTTPRequestHandler]:
+    page = _PAGE_PATH.read_text().replace("__WS_PORT__", str(ws_port))
+    body = page.encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802  (stdlib naming)
+            if self.path not in ("/", "/index.html"):
+                self.send_error(404, "not found")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args) -> None:
+            log.debug("ui http: " + format, *args)
+
+    return Handler
+
+
+def serve_ui(
+    host: str, port: int, ws_port: int
+) -> tuple[ThreadingHTTPServer, threading.Thread]:
+    """Start the config page on a daemon thread. Returns (server, thread)."""
+    server = ThreadingHTTPServer((host, port), _build_handler(ws_port))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    log.info("config page at http://%s:%s", host, port)
+    return server, thread
+```
+
+- [ ] **Step 4: Write the page**
+
+Create `src/fgc_detector/ui/index.html`:
+
+```html
+<!doctype html>
+<meta charset="utf-8">
+<title>FGC Stream Event Detector</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; }
+  fieldset { border: 1px solid #8884; border-radius: 6px; margin: 0 0 1rem; }
+  legend { padding: 0 .4rem; font-weight: 600; }
+  label { display: block; padding: .15rem 0; }
+  .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+  .pill { border-radius: 999px; padding: .1rem .6rem; font-size: .85rem; background: #8883; }
+  .on { background: #2a7; color: #fff; }
+  .off { background: #a33; color: #fff; }
+  button { font: inherit; padding: .3rem .9rem; border-radius: 6px; }
+  #error { color: #c33; min-height: 1.5em; }
+  .hint { color: #8889; font-size: .85rem; margin: .2rem 0 0; }
+</style>
+
+<h1>FGC Stream Event Detector</h1>
+
+<fieldset>
+  <legend>Status</legend>
+  <div class="row">
+    <span id="link" class="pill">connecting…</span>
+    <span id="obs" class="pill">OBS ?</span>
+    <span id="armed" class="pill">?</span>
+    <span id="state" class="pill">?</span>
+  </div>
+  <p class="row" style="margin-top:.8rem">
+    <button id="arm">Arm</button>
+    <button id="disarm">Disarm</button>
+  </p>
+  <p class="hint">Cooldown means a match was just detected; the detector holds until it sees character select.</p>
+</fieldset>
+
+<fieldset>
+  <legend>Active game</legend>
+  <div id="active"></div>
+  <p class="hint">Only one game is on screen at a time, so only one can be active.</p>
+</fieldset>
+
+<fieldset>
+  <legend>Enabled games</legend>
+  <div id="enabled"></div>
+  <p class="hint">The roster offered above. The active game cannot be disabled.</p>
+</fieldset>
+
+<fieldset>
+  <legend>Events to fire</legend>
+  <div id="events"></div>
+  <p class="hint">Status and config messages are always delivered.</p>
+</fieldset>
+
+<p id="error"></p>
+
+<script>
+const WS_PORT = "__WS_PORT__";
+const socket = new WebSocket(`ws://${location.hostname}:${WS_PORT}`);
+const $ = (id) => document.getElementById(id);
+let config = null;
+
+const pill = (el, text, on) => {
+  el.textContent = text;
+  el.className = "pill " + (on === null ? "" : on ? "on" : "off");
+};
+
+const send = (payload) => {
+  $("error").textContent = "";
+  socket.send(JSON.stringify(payload));
+};
+
+socket.onopen = () => pill($("link"), "connected", true);
+socket.onclose = () => pill($("link"), "disconnected", false);
+
+socket.onmessage = (message) => {
+  const data = JSON.parse(message.data);
+  if (data.error) { $("error").textContent = data.error; return; }
+  if (data.type === "status") {
+    pill($("obs"), data.obs_connected ? "OBS connected" : "OBS down", data.obs_connected);
+    pill($("armed"), data.armed ? "armed" : "disarmed", data.armed);
+    pill($("state"), data.state, null);
+  }
+  if (data.type === "config") { config = data; render(); }
+  if (data.type === "match_end") {
+    $("error").textContent = `detected: ${data.winner} wins (${data.confidence})`;
+  }
+};
+
+function render() {
+  $("active").innerHTML = "";
+  for (const game of config.enabled_games) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "active";
+    input.checked = game === config.active_game;
+    input.onchange = () => send({ cmd: "set_game", game });
+    label.append(input, " ", game);
+    $("active").append(label);
+  }
+
+  $("enabled").innerHTML = "";
+  for (const game of config.available_games) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = config.enabled_games.includes(game);
+    input.disabled = game === config.active_game;
+    input.onchange = () => {
+      const games = config.available_games.filter((candidate) =>
+        candidate === game ? input.checked : config.enabled_games.includes(candidate));
+      send({ cmd: "set_enabled_games", games });
+    };
+    label.append(input, " ", game);
+    $("enabled").append(label);
+  }
+
+  $("events").innerHTML = "";
+  for (const event of config.supported_events) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = config.enabled_events.includes(event);
+    input.onchange = () => {
+      const events = config.supported_events.filter((candidate) =>
+        candidate === event ? input.checked : config.enabled_events.includes(candidate));
+      send({ cmd: "set_enabled_events", events });
+    };
+    label.append(input, " ", event);
+    $("events").append(label);
+  }
+}
+
+$("arm").onclick = () => send({ cmd: "arm" });
+$("disarm").onclick = () => send({ cmd: "disarm" });
+</script>
+```
+
+- [ ] **Step 5: Add `ui_port` to config and start the server**
+
+In `src/fgc_detector/config.py`, add to `ServerConfig`:
+
+```python
+@dataclass(frozen=True)
+class ServerConfig:
+    host: str = "127.0.0.1"
+    port: int = 6600
+    ui_port: int = 6601
+```
+
+and read it in `load_config`: `ui_port=int(server_section.get("ui_port", 6601))`. Add to `save_config`'s `server` table and to `config.example.toml`:
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 6600
+# The config page. Open http://127.0.0.1:6601 in a browser.
+ui_port = 6601
+```
+
+In `_cmd_run`, before `asyncio.run(...)`:
+
+```python
+    ui_server, _ui_thread = serve_ui(
+        config.server.host, config.server.ui_port, config.server.port
+    )
+```
+
+and in the `finally` block: `ui_server.shutdown()`. Add `from .ui.http import serve_ui`.
+
+Ensure the HTML ships in the wheel by adding to `pyproject.toml`:
+
+```toml
+[tool.hatch.build.targets.wheel.force-include]
+"src/fgc_detector/ui/index.html" = "fgc_detector/ui/index.html"
+```
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `uv run pytest tests/test_ui_http.py -v`
+Expected: PASS, 4 passed
+
+- [ ] **Step 7: Run the whole suite**
+
+Run: `uv run pytest -v`
+Expected: PASS, all green
+
+- [ ] **Step 8: Verify the page by hand**
+
+With OBS running and a `config.toml` in place:
+
+```bash
+uv run fgc-detect run --config config.toml
+```
+
+Open `http://127.0.0.1:6601`. Confirm: status pills reflect reality; clicking **Arm** flips the armed pill; switching the active game persists to `config.toml`; unchecking a game removes it from the active list; the active game's checkbox is disabled.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add pyproject.toml src/fgc_detector/ui/ src/fgc_detector/config.py src/fgc_detector/cli.py config.example.toml tests/test_ui_http.py
+git commit -m "feat: browser config page for games and events"
+```
+
+---
+
+### Task 16: Street Fighter 6 detector
 
 **Files:**
 - Create: `src/fgc_detector/detectors/sf6.py`, `tests/detectors/test_sf6.py`
@@ -3147,11 +4301,11 @@ on the game's display language.
 
 from __future__ import annotations
 
-from ..types import Frame, Game, Observation, Screen, Side
+from ..types import EventType, Frame, Game, Observation, Screen, Side
 from .registry import register
 from .roi import Roi, fill_ratio
 
-# MEASURE THESE from samples/sf6/ before trusting anything. See Task 13 Step 2.
+# MEASURE THESE from samples/sf6/ before trusting anything. See Task 16 Step 2.
 _ROIS: dict[str, Roi] = {
     "p1_round_1": Roi(x=0, y=0, w=1, h=1),
     "p1_round_2": Roi(x=0, y=0, w=1, h=1),
@@ -3173,6 +4327,9 @@ class Sf6Detector:
 
     def rois(self) -> dict[str, Roi]:
         return dict(_ROIS)
+
+    def supported_events(self) -> frozenset[EventType]:
+        return frozenset({EventType.MATCH_END})
 
     def observe(self, frame: Frame) -> Observation:
         image = frame.image
@@ -3250,7 +4407,7 @@ git commit -m "feat: SF6 detector with sample corpus"
 
 ---
 
-### Task 14: Tekken 8 detector
+### Task 17: Tekken 8 detector
 
 **Files:**
 - Create: `src/fgc_detector/detectors/tekken8.py`, `tests/detectors/test_tekken8.py`
@@ -3262,7 +4419,7 @@ git commit -m "feat: SF6 detector with sample corpus"
 
 - [ ] **Step 1: Ask the user for Tekken 8 sample media — do not skip or fake this**
 
-**STOP and request samples.** Same requirements and naming convention as Task 13 Step 1, into `samples/tekken8/`:
+**STOP and request samples.** Same requirements and naming convention as Task 16 Step 1, into `samples/tekken8/`:
 
 ```
 samples/tekken8/in_match_0001.png
@@ -3276,7 +4433,7 @@ Tekken 8 note: sets are commonly first-to-3 rather than first-to-2, so there are
 
 - [ ] **Step 2: Locate the ROIs**
 
-Same procedure as Task 13 Step 2, using:
+Same procedure as Task 16 Step 2, using:
 
 ```bash
 uv run fgc-detect roi --game tekken8 --sample samples/tekken8/match_end_p1_0001.png --out /tmp/t8_roi.png
@@ -3365,7 +4522,7 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'fgc_detector.detector
 
 - [ ] **Step 5: Write the detector**
 
-Create `src/fgc_detector/detectors/tekken8.py`, structured exactly as `sf6.py` but with Tekken's own ROIs, thresholds, and `_ROUNDS_TO_WIN` as confirmed in Step 1:
+Create `src/fgc_detector/detectors/tekken8.py`, structured exactly as `sf6.py` (Task 16 Step 5) but with Tekken's own ROIs, thresholds, and `_ROUNDS_TO_WIN` as confirmed in Step 1:
 
 ```python
 """Tekken 8 detector.
@@ -3376,7 +4533,7 @@ its own coordinates and round count — sets are typically first-to-3.
 
 from __future__ import annotations
 
-from ..types import Frame, Game, Observation, Screen, Side
+from ..types import EventType, Frame, Game, Observation, Screen, Side
 from .registry import register
 from .roi import Roi, fill_ratio
 
@@ -3404,6 +4561,9 @@ class Tekken8Detector:
 
     def rois(self) -> dict[str, Roi]:
         return dict(_ROIS)
+
+    def supported_events(self) -> frozenset[EventType]:
+        return frozenset({EventType.MATCH_END})
 
     def observe(self, frame: Frame) -> Observation:
         image = frame.image
@@ -3488,3 +4648,6 @@ git commit -m "feat: Tekken 8 detector with sample corpus"
 - [ ] A real SF6 game played on the stream setup produces exactly one `match_end` with the correct winner, and the post-match replay produces none.
 - [ ] The same holds for Tekken 8.
 - [ ] Every fire leaves a PNG and a JSON sidecar in `evidence/`.
+- [ ] `http://127.0.0.1:6601` shows live status, and the Arm button flips `armed` in the next `status` event.
+- [ ] Switching the active game in the page persists to `config.toml` and survives a restart.
+- [ ] Unchecking every event stops `match_end` delivery while `status` keeps arriving.

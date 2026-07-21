@@ -189,9 +189,25 @@ enum turns that into an error at the point of the mistake.
 
 ### Configuration
 
-A single config file covering: OBS host/port/password, the game-capture source name, poll rate,
-active game, WebSocket listen port, agreement threshold N, cooldown seconds, and per-game ROI
-definitions and thresholds.
+A single TOML config file covering: OBS host/port/password, the game-capture source name, poll
+rate, active game, WebSocket and UI listen ports, agreement threshold N, cooldown seconds, the
+enabled-game roster, the enabled-event set, and per-game ROI definitions and thresholds.
+
+The detector also serves a small static configuration page on its own port. The operator uses it
+to see live status, arm and disarm, choose the active game, edit the game roster, and toggle which
+event types are delivered. Changes apply immediately and are written back to the config file, so
+the file stays the source of truth and remains hand-editable.
+
+Two properties are deliberate. **The page has no HTTP API** — it is served as a single static file
+and does everything over the same WebSocket protocol the dashboard uses, so there is one protocol
+to maintain and the page can do nothing the dashboard cannot. And **the detector serves it itself**
+rather than embedding it in the scoreboard dashboard, so the detector stays usable standalone and
+the scoreboard's stdlib-only server needs no knowledge of detector internals.
+
+Only one game is on screen at a time, so the enabled-game roster is the list the operator picks the
+active game from, not a set of detectors running concurrently. Event filtering covers detection
+events only; `status` and `config` messages are always delivered, because letting an operator
+disable them would leave the dashboard blind with no way to recover.
 
 ---
 
