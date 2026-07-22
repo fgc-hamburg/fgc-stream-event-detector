@@ -148,20 +148,43 @@ def test_armed_mid_set_first_reading_is_one_zero_fires_nothing(driver):
     assert driver.confirmer.state is ConfirmerState.LIVE
 
 
-def test_incoherent_jump_both_sides_rebaselines_and_fires_nothing(driver):
+def test_implausible_jump_both_sides_holds_baseline_and_fires_nothing(driver):
     driver.feed(_score(0, 0), 3)
     driver.feed(_score(1, 1), 3)
     assert driver.events == []
-    # subsequent genuine +1 from the new baseline fires normally
-    driver.feed(_score(2, 1), 3)
+    # The baseline must NOT have moved to (1, 1): a genuine +1 relative to the
+    # ORIGINAL (0, 0) baseline -- i.e. (1, 0) -- must still fire P1. Under the
+    # old re-baseline-on-jump behaviour, the baseline would have become
+    # (1, 1) and this next (1, 0) reading would look like a decrease/reset
+    # instead of firing, so this assertion pins the new hold-baseline
+    # behaviour.
+    driver.feed(_score(1, 0), 3)
     assert len(driver.events) == 1
     assert driver.events[0].winner is Side.P1
 
 
-def test_incoherent_jump_of_two_rebaselines_and_fires_nothing(driver):
+def test_implausible_jump_of_two_holds_baseline_and_fires_nothing(driver):
     driver.feed(_score(0, 0), 3)
     driver.feed(_score(2, 0), 3)
     assert driver.events == []
+    # Baseline must still be (0, 0): a genuine +1 relative to it, (1, 0),
+    # must fire P1. Under the old code the baseline would have jumped to
+    # (2, 0) and this (1, 0) reading would look like a decrease and be
+    # swallowed as a reset instead of firing.
+    driver.feed(_score(1, 0), 3)
+    assert len(driver.events) == 1
+    assert driver.events[0].winner is Side.P1
+
+
+def test_reset_after_decrease_rebaselines_then_fires_from_new_baseline(driver):
+    driver.feed(_score(1, 1), 3)  # armed mid-set baseline
+    driver.feed(_score(0, 1), 3)  # decrease on p1 side: reset, not a fire
+    assert driver.events == []
+    # after re-baselining to (0, 1), a genuine +1 relative to the NEW
+    # baseline should fire normally
+    driver.feed(_score(1, 1), 3)
+    assert len(driver.events) == 1
+    assert driver.events[0].winner is Side.P1
 
 
 def test_stale_partial_streak_is_discarded_and_new_frame_counts_as_one(driver):

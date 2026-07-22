@@ -164,18 +164,35 @@ class SetScoreConfirmer:
             winner = Side.P2
 
         if winner is None:
-            # Reset to a lower score, (0, 0) after a nonzero baseline, both
-            # sides changed, a jump of +2, or any other non-single-increment:
-            # re-baseline without firing. A wrong single-winner guess is
-            # worse than a missed event.
+            if score[0] <= b1 and score[1] <= b2:
+                # Reset: a decrease on both sides, or (0, 0) after a nonzero
+                # baseline. Treat as a genuine new starting point and
+                # re-baseline without firing.
+                log.info(
+                    "set reset observed game=%s baseline=%s reading=%s; "
+                    "re-baselined without firing",
+                    self._game.value,
+                    self._baseline,
+                    score,
+                )
+                self._baseline = score
+                return None
+
+            # Implausible higher jump: some component is greater than the
+            # baseline but it isn't a single-side +1 (e.g. +2 on one side,
+            # both sides +1, or a non-adjacent jump). Hold the baseline
+            # unchanged and fire nothing -- a transient misread should not
+            # be able to corrupt tracking and cause a later real win to be
+            # silently swallowed or misattributed. Worst case here is the
+            # detector staying blind until the next arm, which is a visible
+            # failure (stalled scoreboard) rather than a silent wrong winner.
             log.info(
-                "incoherent set-score transition game=%s baseline=%s reading=%s; "
-                "re-baselined without firing",
+                "implausible set-score transition ignored game=%s baseline=%s "
+                "reading=%s; baseline held",
                 self._game.value,
                 self._baseline,
                 score,
             )
-            self._baseline = score
             return None
 
         self._baseline = score

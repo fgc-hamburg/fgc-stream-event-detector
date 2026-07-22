@@ -60,10 +60,17 @@ Behaviour:
   fires nothing.
 - **Fire**: when a confirmed reading is exactly one higher on a single side than the baseline
   (`(b1+1, b2)` or `(b1, b2+1)`), fire `match_end(winner=that side)` and adopt the new baseline.
-- **Reset**: a confirmed reading lower than the baseline, or `(0, 0)` after a non-zero baseline,
-  is a new set — re-baseline, fire nothing.
-- **Implausible jumps** (both sides up, a jump of +2, non-adjacent) never fire and never move the
-  baseline; wait for a coherent reading. Logged.
+- **Reset**: a confirmed reading `S` that differs from baseline `B` and is elementwise not greater
+  (`S[0] <= B[0] and S[1] <= B[1]`) — covering both a decrease and `(0, 0)` after a non-zero
+  baseline — is a new set: re-baseline to `S`, fire nothing. Logged at info.
+- **Implausible higher jumps**: any other non-single-increment transition (some component greater
+  than the baseline but not a clean `+1` on exactly one side — e.g. both sides up, a jump of +2,
+  non-adjacent) **holds the baseline unchanged** and fires nothing; wait for a coherent reading.
+  Logged at info. This is a deliberate trade-off: holding the baseline is robust against the
+  transient misreads that dominate residual risk under N-frame agreement, and its accepted
+  limitation is that if the detector is blind through 2+ whole games, the tracked score diverges
+  from the real one and detection stalls until the next arm — a visible, per-set-recoverable
+  failure, which is preferred over silently reporting a wrong winner.
 - **Staleness**: a partial agreement streak older than the staleness window is discarded, as in
   the marker path.
 
