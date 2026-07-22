@@ -17,6 +17,7 @@ from pathlib import Path
 import cv2
 
 from .config import ConfigError, load_config, save_config
+from .confirmation import make_confirmer
 from .confirmer import Confirmer, ConfirmerConfig
 from .detectors.registry import UnknownGameError, get_detector
 from .frames.obs import ObsFrameSource, default_client_factory
@@ -76,7 +77,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         print(exc, file=sys.stderr)
         return 2
 
-    confirmer = Confirmer(game, ConfirmerConfig())
+    confirmer = make_confirmer(game, ConfirmerConfig())
     confirmer.arm()
 
     source = VideoFrameSource(args.video, detector.canonical_size, args.sample_every)
@@ -232,7 +233,7 @@ async def _pump(
 def _cmd_run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     detector = get_detector(config.game)
-    confirmer = Confirmer(config.game, config.confirmer)
+    confirmer = make_confirmer(config.game, config.confirmer)
     source = ObsFrameSource(
         client_factory=default_client_factory(
             config.obs.host, config.obs.port, config.obs.password
