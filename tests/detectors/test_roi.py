@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from fgc_detector.detectors.roi import Roi, fill_ratio, match_template, mean_color
+from fgc_detector.detectors.roi import Roi, fill_ratio, match_template
 
 
 def _black(width: int = 100, height: int = 100) -> np.ndarray:
@@ -65,13 +65,6 @@ def test_roi_outside_image_bounds_returns_zero_not_a_crash():
     # A resolution change can push an ROI off the frame. Degrade to "saw
     # nothing" rather than raising in the middle of a live match.
     assert fill_ratio(_black(50, 50), Roi(40, 40, 100, 100)) == 0.0
-
-
-def test_mean_color_is_bgr_order():
-    image = _black()
-    image[0:10, 0:10] = (255, 0, 0)  # pure blue in BGR
-    blue, green, red = mean_color(image, Roi(0, 0, 10, 10))
-    assert (blue, green, red) == pytest.approx((255.0, 0.0, 0.0))
 
 
 def test_match_template_identical_region_scores_one():

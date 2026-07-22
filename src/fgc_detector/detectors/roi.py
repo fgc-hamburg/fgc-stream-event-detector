@@ -52,15 +52,6 @@ def fill_ratio(image: np.ndarray, roi: Roi, threshold: int = 128) -> float:
     return float(np.count_nonzero(gray > threshold) / gray.size)
 
 
-def mean_color(image: np.ndarray, roi: Roi) -> tuple[float, float, float]:
-    """Mean BGR of the ROI, or (0, 0, 0) if it falls outside the frame."""
-    patch = roi.crop(image)
-    if patch.size == 0:
-        return (0.0, 0.0, 0.0)
-    blue, green, red = patch.reshape(-1, 3).mean(axis=0)
-    return (float(blue), float(green), float(red))
-
-
 def match_template(image: np.ndarray, roi: Roi, template: np.ndarray) -> float:
     """Normalized correlation of the ROI against `template`, in 0.0–1.0.
 

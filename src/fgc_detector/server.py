@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 import websockets
 
-from .confirmer import Confirmer
+from .confirmation import ConfirmerLike
 from .detectors.registry import available_games, get_detector
 from .events import (
     ArmCommand,
@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 class EventServer:
     def __init__(
         self,
-        confirmer: Confirmer,
+        confirmer: ConfirmerLike,
         host: str,
         port: int,
         obs_connected_getter: Callable[[], bool],
@@ -78,7 +78,15 @@ class EventServer:
         )
 
     def _apply(self, settings: RuntimeSettings) -> None:
-        """Adopt new settings, sync the confirmer, and persist."""
+        """Adopt new settings, sync the confirmer, and persist.
+
+        `set_game` only mutates the existing confirmer's `game` attribute; it
+        does not rebuild it via `make_confirmer`. If `active_game` switches to
+        a game whose confirmation strategy differs from the one already
+        constructed (e.g. SF6's counter-based confirmer vs. a future
+        marker-based game), the confirmer silently keeps running the wrong
+        strategy until restart. Not yet handled -- see docs/TODO.md.
+        """
         self.settings = settings
         if self.confirmer.game is not settings.active_game:
             self.confirmer.set_game(settings.active_game)

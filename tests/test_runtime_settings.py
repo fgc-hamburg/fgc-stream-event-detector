@@ -166,6 +166,23 @@ def test_save_config_round_trips(tmp_path):
     assert reloaded.obs.source_name == "Game Capture", "unrelated settings preserved"
 
 
+def test_streak_staleness_seconds_survives_save_config_round_trip(tmp_path):
+    """Same bug class as test_ui_port_survives_save_config_round_trip, applied
+    to `confirmer.streak_staleness_seconds`: if save_config's `confirmer` table
+    drops that field, the reload falls back to the dataclass default (3.0)
+    instead of the non-default value set here, and this assertion fails.
+    """
+    from dataclasses import replace
+
+    path = _write(tmp_path, VALID)
+    config = load_config(path)
+    updated = replace(
+        config, confirmer=replace(config.confirmer, streak_staleness_seconds=12.5)
+    )
+    save_config(path, updated)
+    assert load_config(path).confirmer.streak_staleness_seconds == 12.5
+
+
 def test_ui_port_survives_save_config_round_trip(tmp_path):
     """Guards against a field added to ServerConfig, load_config, and
     config.example.toml but forgotten in save_config's document dict (or vice

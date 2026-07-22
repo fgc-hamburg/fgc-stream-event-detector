@@ -19,7 +19,6 @@ from .types import (
     Game,
     Observation,
     Screen,
-    Side,
 )
 
 log = logging.getLogger(__name__)

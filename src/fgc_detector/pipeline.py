@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from .confirmer import Confirmer
+from .confirmation import ConfirmerLike
 from .detectors.registry import Detector
 from .events import MatchEndEvent
 from .frames.source import FrameSource
@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 def run_offline(
     source: FrameSource,
     detector: Detector,
-    confirmer: Confirmer,
+    confirmer: ConfirmerLike,
     recorder: FireRecorder | None = None,
 ) -> list[MatchEndEvent]:
     """Drive the pipeline to exhaustion, returning every confirmed event."""

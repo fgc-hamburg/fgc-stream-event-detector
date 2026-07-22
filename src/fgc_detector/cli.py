@@ -17,8 +17,8 @@ from pathlib import Path
 import cv2
 
 from .config import ConfigError, load_config, save_config
-from .confirmation import make_confirmer
-from .confirmer import Confirmer, ConfirmerConfig
+from .confirmation import ConfirmerLike, make_confirmer
+from .confirmer import ConfirmerConfig
 from .detectors.registry import UnknownGameError, get_detector
 from .frames.obs import ObsFrameSource, default_client_factory
 from .frames.offline import VideoFrameSource
@@ -159,7 +159,7 @@ def _cmd_capture(args: argparse.Namespace) -> int:
 
 async def _pump(
     source: ObsFrameSource,
-    confirmer: Confirmer,
+    confirmer: ConfirmerLike,
     server: EventServer,
     recorder: FireRecorder,
 ) -> None:
