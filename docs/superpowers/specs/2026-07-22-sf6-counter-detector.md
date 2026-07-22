@@ -74,15 +74,26 @@ Behaviour:
 - **Staleness**: a partial agreement streak older than the staleness window is discarded, as in
   the marker path.
 
-## Validation target
+## Validation target (as achieved)
 
-`fgc-detect replay --game sf6 --video ~/repos/sf6.mp4` must emit **exactly four** `match_end`
-events with winners **P1, P2, P1, P1**, at roughly 75s, 131s, 244s, 290s — the true game ends.
-No events during rounds, KOs, or between-game transitions.
+`fgc-detect replay --game sf6 --video ~/repos/sf6.mp4` emits **three** `match_end` events with
+winners **P1, P2, P1** — the first three games of the set (the increments 0-0→1-0→1-1→2-1). Each
+fires a few seconds into the *following* game, when the new score first appears on the in-match
+HUD. No events during rounds, KOs, or between-game transitions. This is the validated result.
 
-## Known limitation
+## Known limitations
 
-The clip contains only P2 ∈ {0, 1}; P2=2/3 reading is via cross-box references and unvalidated
-against real P2=2/3 frames. Tracked in `docs/TODO.md`.
+**The set-deciding game is not detected (accepted for the initial approach).** This method fires a
+game when the *next* game displays the incremented score on the in-match HUD. The set-clinching
+game has no next game — its result (e.g. "WON 3-1 LOST") appears only on the post-set RESULT
+screen, in a different layout the detector does not read. So a set's final game is always missed;
+the operator/dashboard supplies it. Extending the detector to read the RESULT screen would close
+this (tracked in `docs/TODO.md`). This is why the clip validates to three events, not four.
+
+**P2=2/3 is unvalidated.** The clip contains only P2 ∈ {0, 1}; P2=2/3 reading relies on cross-box
+references. Tracked in `docs/TODO.md`.
+
+**A per-game lag of a few seconds** is inherent: a game is only confirmed once the following game
+renders the new score, not at the KO. Acceptable for a running scoreboard.
 
 Calibration facts (ROIs, thresholds, corpus timestamps): see the `sf6-counter-calibration` memory.

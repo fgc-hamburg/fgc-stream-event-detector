@@ -21,6 +21,16 @@ P2 never wins a 2nd or 3rd game in it. The detector reads P2=2/3 via cross-box (
 references, which is **unvalidated against real P2=2/3 frames**. Close this with a clip where P2
 wins at least two games, then add those frames to the corpus.
 
+## SF6: detect the set-deciding game via the RESULT screen (open)
+
+The counter/increment method catches games 1..N-1 of a set but never the set-clinching game N: its
+incremented score never appears on an in-match HUD (there is no next game), only on SF6's post-set
+RESULT screen ("Player 1 ... WON 3 - 1 LOST ... Player 2"). For the initial approach the operator
+supplies the final game (user decision, 2026-07-22). To close it: add a second read path to the SF6
+detector that recognises the RESULT screen and reads its two numbers (left = P1 games, right = P2),
+feeding them to the confirmer so the final increment fires. Needs its own ROIs/calibration; only one
+result frame exists in the current clip (~291-292.5s of `~/repos/sf6.mp4`).
+
 ## Quality follow-ups from review (deferred to a final pass)
 
 - `save_config` / `load_config` hand-mirror their field lists in two places; a field added to one
