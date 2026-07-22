@@ -36,8 +36,11 @@ result frame exists in the current clip (~291-292.5s of `~/repos/sf6.mp4`).
 - `save_config` / `load_config` hand-mirror their field lists in two places; a field added to one
   and forgotten in the other silently resets on every save (already happened once). Derive one
   from the other.
-- `match_template` / `mean_color` in `detectors/roi.py`: confirm they now have a consumer (the SF6
-  digit reader should use `match_template`); if `mean_color` stays unused, delete it (YAGNI).
 - `config_event` does registry lookups on every broadcast for a value that never changes at runtime.
 - Generalize confirmer selection: the pipeline/CLI pick a confirmation strategy per game via a
   factory. Revisit if a third strategy appears.
+  - Concrete hazard: runtime `set_game` does not re-select the confirmer strategy;
+    `make_confirmer` runs once at startup. Switching between games with different strategies
+    (e.g. SF6 counter ↔ a future marker game) at runtime silently stops detection until restart.
+    Fix when the second strategy game lands: rebuild the confirmer in the run loop / server when
+    the active game's strategy changes.
