@@ -70,6 +70,10 @@ _EMPTY_NUM_MAP: Mapping[str, float] = MappingProxyType({})
 DETAIL_P1_ROUNDS = "p1_rounds"
 DETAIL_P2_ROUNDS = "p2_rounds"
 
+#: Keys under which a counter detector publishes per-side games-won-in-set counts.
+DETAIL_P1_GAMES = "p1_games"
+DETAIL_P2_GAMES = "p2_games"
+
 
 @dataclass(frozen=True)
 class Frame:
