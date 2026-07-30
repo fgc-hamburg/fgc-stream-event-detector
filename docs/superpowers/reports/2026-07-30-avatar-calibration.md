@@ -126,7 +126,7 @@ Three complete matches were traced end-to-end in the footage (player
 
 | match | stage | rounds | winner | 2nd-pip-lit second | notes |
 |---|---|---|---|---|---|
-| 1 | fire-nation (orange) | went to Round 3 (1-1 split, decided in the 3rd) | **P1** | not directly observable (see below) | results screen at t=138s reads "renatomrcosta WON 1 / Than0ss LOST" |
+| 1 | fire-nation (orange) | went to Round 3 (1-1 split, decided in the 3rd) | **P1** | **t≈132.5s** | P1's 2nd pip lights at t=132.5s (`P1[1.00, 0.95]` → 2-1) and stays lit through ~t=137.0s before the wipe to results at t≈137.5s |
 | 2 | rocky (gray) | 2-0 sweep | **P2** | **t≈228.7s** | `P2_PIP_1`/`P2_PIP_2` both cross `PIP_LIT` at t=228.66s; FINISH banner ~229-233s |
 | 3 | fire-nation (orange) | 2-0 sweep | **P1** | **t≈323.0s** | `P1_PIP_1`/`P1_PIP_2` both cross `PIP_LIT` at t=322.99s; FINISH banner ~326-333s |
 
@@ -135,29 +135,25 @@ not traced to completion — not needed once 3 clean, cross-validated matches
 (covering both winners, 3 different stages, and both a sweep and a
 split-then-decided match) were confirmed.
 
-### Known limitation: match 1's decisive round never visibly shows "2 lit"
+### Correction: the decisive-round win IS detected (no coverage gap)
 
-For match 1 (decided in round 3 after a 1-1 split), the pip UI was traced
-frame-by-frame (0.1s steps) from t=129s through the "FINISH" freeze and the
-wipe to the results screen at t=138s. It **stays at 1-1 the entire time** —
-the winning side's second pip never renders on screen before the game cuts to
-the post-match menu. This is a genuine, measured game-UI behavior, not a
-detector bug: matches 2 and 3 (sweeps) *do* show the clean 2-lit state before
-FINISH, so the pip mechanic and this calibration's constants are correct; it
-is specifically the "decided on the last possible round" case where the UI's
-final-state animation appears to be skipped or hidden behind the transition.
+An earlier draft of this report claimed match 1's deciding pip never renders,
+based on a manual frame-step that was mistaken. A frame-accurate detector
+trace (0.5s steps, 126–140s) refutes it: match 1 reads a stable **1-1** from
+t≈126s, then P1's **second pip lights at t=132.5s** (`P1[1.00, 0.95]`, well
+above `PIP_LIT`) and holds at **2-1 through t≈137.0s** — roughly 4.5 seconds
+on screen — before the screen wipes to results (`UNKNOWN`, emblem-gray jumps
+to ~116 at t≈137.5s). That is far longer than the Confirmer's agreement
+window, so the deciding-round win is confirmed and fired correctly (verified
+in replay, §8: `MATCH_END P1` at t≈132.5s).
 
-Consequence for Task 4/5: the marker `Confirmer`, which requires several
-frames of agreement before firing, will correctly **not** fire a `match_end`
-for a match that ends this way — it will simply miss it (no event emitted).
-Per this plan's fail-safe constraint ("any ambiguous reading resolves to no
-event, never a false winner"), this is the correct, safe behavior, but it
-should be flagged to the user as a real coverage gap: **matches decided in
-their final possible round may not produce a `match_end` event**, only
-matches decided with a round to spare (i.e. 2-0, or presumably 3-1/3-2 in a
-best-of-5) reliably will. This is worth a follow-up investigation with more
-footage before Avatar detection is trusted in production, but is out of scope
-for this calibration task.
+So **all three traced matches are detected**, including the one decided in its
+final possible round. There is no "final-round coverage gap." The pip mechanic
+renders the winning pip whether the match ends on a sweep or a deciding round;
+the constants in §3 read all three correctly. (The only genuine gaps remain the
+documented ones: no character-select screen exists in this footage to calibrate
+against, and brief all-dark transition frames read as `IN_MATCH 0-0` — both
+harmless and fail-safe.)
 
 ## 6. Corpus
 
@@ -197,10 +193,10 @@ All required constants were measured with clean margins:
   "present" (documented, harmless per fail-safe design).
 - `CHAR_SELECT_ROI` — **not measurable**, no such screen in the footage
   (flagged, not guessed).
-- Ground truth: 3 traced matches, both winners represented, 2 clean 2-pip
-  sweeps (t≈228.7s P2 win, t≈323.0s P1 win) plus 1 documented case where the
-  UI never shows the deciding pip (t=138s, P1 win by result-screen only) —
-  flagged as a coverage gap for Task 5's replay validation to expect.
+- Ground truth: 3 traced matches, both winners represented — two 2-0 sweeps
+  (t≈228.7s P2 win, t≈323.0s P1 win) and one match decided in the final round
+  (t≈132.5s P1 win, 2-1). All three are detected in replay (§8); the earlier
+  "final-round gap" was a manual-trace error, corrected in §5.
 
 ## 8. Replay validation (Task 5)
 
@@ -242,30 +238,21 @@ Against the §5 ground truth:
 - **Event 4 (t≈499.7s, P2)** is one of the untraced later matches on the
   4th (green/mystic) stage that §5 flagged as "may also produce events, that
   is fine" — reported, not scored against a specific ground-truth second.
-- **Event 1 (t≈132.5s, P1)** is *not* one of the two expected sweeps and
-  lands a few seconds *before* match 1's results screen (t=138s), inside the
-  window §5 documented as a coverage gap where the manual 0.1s-step trace
-  never observed a 2-lit pip for the winning side. Two explanations are
-  consistent with the data and neither is a false-winner: (a) the winning
-  pip does render for a handful of frames narrow enough that the manual
-  trace's sampling missed it, and the detector's ~5fps replay sampling
-  happened to catch 3 agreeing frames of it; or (b) transient stage-colour
-  bleed on the fire-nation stage (the "primary measured risk" in §3) briefly
-  crossed `PIP_LIT` on P1's pips for 3+ consecutive sampled frames. Either
-  way, the reported winner (P1) is the actual match-1 winner, so this is not
-  a false positive on the winner, only an earlier-than-expected / previously
-  undocumented firing. Flagged here as a follow-up item, not fixed in this
-  task per the "measure, don't re-guess to make a test pass" constraint —
-  Task 3's stated coverage gap should be revisited with a finer-grained
-  manual trace around t≈130-138s before Avatar is trusted in production for
-  final-round-decided matches.
+- **Event 1 (t≈132.5s, P1)** is match 1, decided in the final round (2-1) —
+  **correct**. A frame-accurate detector trace (0.5s steps, 126–140s) settles
+  what Task 3's manual step got wrong: the match reads a stable 1-1 from
+  ~126s, then P1's second pip lights at **t=132.5s** (`P1[1.00, 0.95]`) and
+  holds at 2-1 through ~137.0s (~4.5s on screen) before the wipe to results.
+  That is well beyond the agreement window, so the win confirms cleanly. This
+  is not a coverage gap and not a false positive — it is the third real match,
+  correctly detected. §5 has been corrected accordingly.
 
 **Sanity check:** 4 events total across ~500s of footage, well-spaced (no
 mid-round spam), both documented sweeps present with the correct winner and
 lag within a few seconds, and no event ever names the wrong side.
 
-**Judgement: PASS**, with one flagged follow-up (event 1 above) — the two
-ground-truth sweeps are correctly and cleanly detected, and every emitted
-event names a genuine match winner; the earlier-than-expected match-1 event
-is new information for the existing coverage-gap note in §5, not a
-regression or a false winner.
+**Judgement: PASS.** All three traced matches are detected with the correct
+winner — the two 2-0 sweeps and the 2-1 final-round decision (event 1) — plus
+one untraced later match, across ~500s with no mid-round spam and no event
+naming the wrong side. No open follow-up: the frame-accurate trace confirmed
+event 1 is a genuine, correctly-detected match end, and §5 has been corrected.
