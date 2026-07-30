@@ -40,3 +40,12 @@ def test_default_confirmer_exposes_pipeline_interface() -> None:
     confirmer = make_confirmer(Game.TEKKEN8, ConfirmerConfig())
     for attr in _INTERFACE_ATTRS:
         assert hasattr(confirmer, attr), f"missing {attr}"
+
+
+def test_avatar_uses_the_marker_confirmer() -> None:
+    from fgc_detector.confirmation import make_confirmer
+    from fgc_detector.confirmer import Confirmer, ConfirmerConfig
+    from fgc_detector.types import Game
+    confirmer = make_confirmer(Game.AVATAR, ConfirmerConfig())
+    assert isinstance(confirmer, Confirmer)
+    assert confirmer.game is Game.AVATAR
