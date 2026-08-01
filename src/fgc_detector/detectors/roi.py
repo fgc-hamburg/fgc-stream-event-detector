@@ -67,3 +67,40 @@ def match_template(image: np.ndarray, roi: Roi, template: np.ndarray) -> float:
         return 0.0
     score = cv2.matchTemplate(patch, template, cv2.TM_CCOEFF_NORMED)
     return float(max(0.0, score[0][0]))
+
+
+def color_fill_ratio(
+    image: np.ndarray,
+    roi: Roi,
+    *,
+    hue_lo: int,
+    hue_hi: int,
+    sat_min: int,
+    val_min: int,
+) -> float:
+    """Fraction of the ROI's pixels that are a vivid instance of one colour.
+
+    A pixel counts when its HSV hue is in ``[hue_lo, hue_hi]`` (OpenCV's 0-179
+    scale) AND its saturation >= ``sat_min`` AND its value >= ``val_min``. When
+    ``hue_lo > hue_hi`` the band wraps around 0 (e.g. red: ``hue_lo=170,
+    hue_hi=10`` matches both H~179 and H~0).
+
+    The colour analogue of ``fill_ratio``: it reads a pip that fills with a
+    saturated colour (red, blue) rather than with brightness, and rejects both
+    a dark empty interior (fails ``val_min``/``sat_min``) and a bright outline
+    of a different hue (fails the hue band). Degrades to 0.0 on an out-of-frame
+    ROI, like every primitive here.
+    """
+    patch = roi.crop(image)
+    if patch.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+    hue = hsv[:, :, 0]
+    sat = hsv[:, :, 1]
+    val = hsv[:, :, 2]
+    if hue_lo <= hue_hi:
+        hue_mask = (hue >= hue_lo) & (hue <= hue_hi)
+    else:  # wrap-around band around 0 (red)
+        hue_mask = (hue >= hue_lo) | (hue <= hue_hi)
+    mask = hue_mask & (sat >= sat_min) & (val >= val_min)
+    return float(np.count_nonzero(mask) / mask.size)

@@ -21,6 +21,7 @@ import numpy as np
 class Game(StrEnum):
     SF6 = "sf6"
     TEKKEN8 = "tekken8"
+    AVATAR = "avatar"
 
 
 class Side(StrEnum):

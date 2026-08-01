@@ -116,5 +116,7 @@ def test_example_config_loads_cleanly_with_documented_defaults():
     assert config.confirmer.cooldown_max_seconds == 180.0
     assert config.confirmer.streak_staleness_seconds == 3.0
     assert config.runtime.active_game is Game.SF6
-    assert config.runtime.enabled_games == frozenset({Game.SF6, Game.TEKKEN8})
+    assert config.runtime.enabled_games == frozenset(
+        {Game.SF6, Game.TEKKEN8, Game.AVATAR}
+    )
     assert config.runtime.enabled_events == frozenset({EventType.MATCH_END})
