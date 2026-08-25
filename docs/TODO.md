@@ -2,6 +2,26 @@
 
 Tracked items intentionally postponed. Each is real, just not now.
 
+## Avatar: harden the HUD-present gate against dark transition frames (deferred 2026-07-30)
+
+`AvatarPipDetector` gates "match HUD present" on the clock emblem being **dark**
+(`EMBLEM_ROI` mean-gray <= `EMBLEM_DARK_MAX`). An all-dark transition frame (KO
+wipe, title card) also passes this gate, so such frames read `IN_MATCH 0-0`
+instead of `UNKNOWN`. This is harmless in the validated capture (replay fired 4
+well-spaced events, no duplicates) and the 0-0 reading is in fact the Confirmer's
+cooldown-release signal — but `confirmer.py::_observe_cooldown` documents that its
+safety design assumes a detector reports `UNKNOWN` (not `IN_MATCH 0-0`) on
+non-gameplay screens; a differently-timed wipe or a lingering win screen could in
+principle trigger the premature-cooldown-release / duplicate-`match_end` path that
+docstring warns about. To close it: distinguish a real emblem (dark box **with
+bright digits** → high grayscale variance/contrast in `EMBLEM_ROI`) from a
+uniformly-dark wipe (low variance) — e.g. require both `mean <= EMBLEM_DARK_MAX`
+and `std >= <measured threshold>`. Needs the variance threshold measured from
+footage across in-match vs wipe frames (never guessed); the committed corpus
+(`samples/avatar/` in_match vs between frames) already contains both cases to
+measure from. Also revisit once real character-select footage exists (that branch
+was omitted for lack of any char-select screen in the calibration clip).
+
 ## Tekken 8 detector (deferred 2026-07-22)
 
 v1 shipped with SF6 only. Tekken 8 is deferred at the user's request.

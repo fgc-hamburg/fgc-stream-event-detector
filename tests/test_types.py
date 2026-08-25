@@ -58,3 +58,9 @@ def test_payload_differs_on_winner():
     a = Observation(Screen.MATCH_END, winner=Side.P1)
     b = Observation(Screen.MATCH_END, winner=Side.P2)
     assert a.payload != b.payload
+
+
+def test_avatar_is_a_game() -> None:
+    from fgc_detector.types import Game
+    assert Game("avatar") is Game.AVATAR
+    assert Game.AVATAR.value == "avatar"

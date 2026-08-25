@@ -7,4 +7,5 @@ detector available via `registry.get_detector`.
 
 from __future__ import annotations
 
+from . import avatar  # noqa: F401
 from . import sf6  # noqa: F401
