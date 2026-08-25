@@ -49,3 +49,12 @@ def test_avatar_uses_the_marker_confirmer() -> None:
     confirmer = make_confirmer(Game.AVATAR, ConfirmerConfig())
     assert isinstance(confirmer, Confirmer)
     assert confirmer.game is Game.AVATAR
+
+
+def test_tokon_uses_the_marker_confirmer() -> None:
+    """TOKON counts round pips, so it gets the default marker strategy --
+    not SF6's set-score counter."""
+    confirmer = make_confirmer(Game.TOKON, ConfirmerConfig())
+
+    assert isinstance(confirmer, Confirmer)
+    assert confirmer.game is Game.TOKON

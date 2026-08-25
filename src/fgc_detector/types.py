@@ -22,6 +22,7 @@ class Game(StrEnum):
     SF6 = "sf6"
     TEKKEN8 = "tekken8"
     AVATAR = "avatar"
+    TOKON = "tokon"
 
 
 class Side(StrEnum):
