@@ -2,7 +2,7 @@
 
 Watches an OBS **game-capture** source with computer vision and emits stream events over a
 WebSocket. It emits one event — **match end, naming the winner** — validated against real footage
-for **Street Fighter 6** and **Avatar Legends** (Tekken 8 is scaffolded but deferred; see
+for **Street Fighter 6**, **Avatar Legends** and **Marvel TOKON** (Tekken 8 is scaffolded but deferred; see
 [`docs/TODO.md`](docs/TODO.md)).
 
 It is consumed by the [FGC Scoreboard](https://github.com/renatomrcosta/fgc-scoreboard) control
@@ -18,12 +18,18 @@ core design idea, not an afterthought:
 
 | Game | Reads | Strategy |
 |---|---|---|
-| Street Fighter 6 | the games-won-in-set digit beside each name | glyph template match + counter-increment confirmer |
 | Avatar Legends | the red/blue round pips flanking the clock emblem | colour fill-ratio + marker confirmer (2 pips → win) |
+| Marvel TOKON | the six round pips flanking the match clock | icon-vs-background difference + marker confirmer (3 pips → win) |
+| Street Fighter 6 | the games-won-in-set digit beside each name | glyph template match + counter-increment confirmer |
 | Tekken 8 | *(deferred)* | *TBD — its own way* |
 
-Digit counting is SF6's answer to the interface; pip-colour counting is Avatar's. Neither is a
-global rule. **To add a game, read [`CLAUDE.md`](CLAUDE.md)** — it is the step-by-step guide.
+**Counting round-win pips is the default**: most fighting games draw a fixed row of markers per
+side, so a new game usually means measuring six rectangles and contributing a per-frame "is this
+marker lit?" test — the shared marker confirmer does the rest. SF6 is the **exception**: it has no
+pip row, only a games-won-in-set digit, so it needs its own digit reader and its own
+counter-increment confirmer. How each game reads "lit" is still its own business — Avatar's pips
+are colour-coded, TOKON's are character icons in arbitrary colours — but the shape of the answer is
+the same. **To add a game, read [`CLAUDE.md`](CLAUDE.md)** — it is the step-by-step guide.
 
 ## Architecture
 
@@ -44,11 +50,11 @@ flowchart LR
 
     subgraph Detect["Detector (pure, per-game — picked by registry)"]
         NORM["normalize → 1920×1080"]
-        DET["&lt;Game&gt;Detector.observe()<br/>reads ROIs → Observation<br/>(SF6: digit match · Avatar: pip colour)"]
+        DET["&lt;Game&gt;Detector.observe()<br/>reads ROIs → Observation<br/>(pips by default · SF6: digit match)"]
     end
 
     subgraph Confirm["Confirmer (stateful, shared — picked by make_confirmer)"]
-        CONF["N-frame agreement · arm / disarm / set_game<br/>SF6: counter increment · Avatar: reach-2-pips"]
+        CONF["N-frame agreement · arm / disarm / set_game<br/>reach-N pips by default · SF6: counter increment"]
     end
 
     subgraph Out["Outputs"]
@@ -79,7 +85,9 @@ the operator; a false one corrupts the scoreboard. See
 [`docs/superpowers/specs/2026-07-22-sf6-counter-detector.md`](docs/superpowers/specs/2026-07-22-sf6-counter-detector.md)
 (SF6; note the set-deciding game is not auto-detected — the operator supplies it) and
 [`docs/superpowers/specs/2026-07-30-avatar-legends-detector.md`](docs/superpowers/specs/2026-07-30-avatar-legends-detector.md)
-(Avatar; see also the calibration report under `docs/superpowers/reports/`).
+(Avatar) and
+[`docs/superpowers/specs/2026-08-25-tokon-pip-detector.md`](docs/superpowers/specs/2026-08-25-tokon-pip-detector.md)
+(TOKON; see also the calibration reports under `docs/superpowers/reports/`).
 
 ## Setup
 
@@ -119,7 +127,7 @@ Key fields (full annotations in [`config.example.toml`](config.example.toml)):
 
 | Field | Meaning |
 |---|---|
-| `game` | Active game (`sf6` / `avatar` / `tekken8`) |
+| `game` | Active game (`sf6` / `avatar` / `tokon` / `tekken8`) |
 | `obs.source_name` | Name of the **Game Capture** source (not a scene, not program output) |
 | `obs.host` / `port` / `password` | obs-websocket connection |
 | `obs.poll_hz` | Screenshot rate (default `5.0`; above ~10Hz wastes OBS's graphics thread) |
@@ -146,6 +154,10 @@ uv run fgc-detect replay --game sf6 --video ~/repos/sf6.mp4
 
 uv run fgc-detect replay --game avatar --video ~/repos/avatar.mp4
 # → match_end p1 00:02:12 · match_end p2 00:03:49 · match_end p1 00:05:28 · match_end p2 00:08:19
+
+uv run fgc-detect replay --game tokon --video ~/repos/tokon/TOKON.mp4
+# → match_end p1 00:01:51 · match_end p2 00:04:48 · match_end p1 00:07:50
+#   · match_end p2 00:09:43 · match_end p1 00:11:07
 ```
 
 Each line is printed as a `match_end` JSON event; the `ts` encodes the position in the video. This
@@ -211,7 +223,7 @@ uv run pytest            # full suite — no OBS, GPU, network, or real clock re
 
 Tests are hermetic: frame sources, the clock, and OBS are all injected, so the whole suite runs
 offline and deterministically. Each detector is validated against a labelled corpus of real frames
-(`samples/sf6/`, `samples/avatar/`) built reproducibly by `scripts/build_*_corpus.py`. No test loads
+(`samples/sf6/`, `samples/avatar/`, `samples/tokon/`) built reproducibly by `scripts/build_*_corpus.py`. No test loads
 a raw `.mp4` — the committed corpus PNGs are the ground truth.
 
 **Layout:**
@@ -222,14 +234,15 @@ src/fgc_detector/
   server.py         WebSocket event server + command handling
   pipeline.py       offline replay driver
   confirmation.py   make_confirmer factory (strategy per game)
-  confirmer.py            marker/pip confirmer (reach-N → win) — SF6 marker + Avatar
+  confirmer.py            marker/pip confirmer (reach-N → win) — the default; Avatar + TOKON
   set_score_confirmer.py  SF6 counter-increment confirmer
   events.py         the JSON boundary (only place enums ↔ strings)
   types.py          enums + frozen dataclasses (Game, Side, EventType, DETAIL_* keys, …)
   config.py         TOML load/save
   observability.py  FireRecorder (evidence dumps)
-  detectors/        registry.py · roi.py (fill_ratio, color_fill_ratio, match_template)
-                    sf6.py · avatar.py · marker.py   ← one module per game
+  detectors/        registry.py · roi.py (fill_ratio, color_fill_ratio, match_template,
+                                   pale_fill_ratio, region_difference)
+                    sf6.py · avatar.py · tokon.py · marker.py   ← one module per game
   frames/           obs.py (live), offline.py (VOD), normalize.py
   ui/               http.py + index.html (config page)
 ```

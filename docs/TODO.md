@@ -22,6 +22,32 @@ footage across in-match vs wipe frames (never guessed); the committed corpus
 measure from. Also revisit once real character-select footage exists (that branch
 was omitted for lack of any char-select screen in the calibration clip).
 
+## TOKON: verify the ROIs against a native 1920x1080 capture (open, 2026-08-26)
+
+`TokonPipDetector` was calibrated entirely from `~/repos/tokon/TOKON.mp4`, a **1280x714** capture
+that `normalize()` upscales to 1920x1080 (aspect 1.7927 vs 1.7778 — inside the 2% tolerance, so
+~0.8% of vertical squash is baked into every measured coordinate). The ROIs are 6-24px boxes, so a
+small systematic offset matters. Before trusting live detection:
+
+```bash
+uv run fgc-detect capture --config config.toml --out obs_frames --limit 30
+uv run fgc-detect roi --game tokon --sample obs_frames/frame_00000.png --out roi_check.png
+```
+
+The 18 boxes must sit on the six pip slots (core inside the white circle, icon over the disc,
+background on bare stage above it). If they are off, re-measure against the 1080p frames and add
+them to `samples/tokon/`. See section 8 of
+`docs/superpowers/reports/2026-08-26-tokon-calibration.md`.
+
+## MarkerRoundDetector has no users (open, 2026-08-26)
+
+`detectors/marker.py` (`MarkerLayout` + `MarkerRoundDetector`, brightness `fill_ratio`) is
+registered for **zero** games, while `avatar.py`, `sf6.py` and `tokon.py` each hand-roll their own
+pip/marker loop. Now that pip counting is the documented default (CLAUDE.md, "How to add a new
+game" step 3), the generic path should either grow to cover the real cases — parametrising the
+per-slot "is it lit?" test instead of hard-coding brightness — or be deleted so it stops looking
+like the route to take. Decide when a fourth pip game lands.
+
 ## Tekken 8 detector (deferred 2026-07-22)
 
 v1 shipped with SF6 only. Tekken 8 is deferred at the user's request.
