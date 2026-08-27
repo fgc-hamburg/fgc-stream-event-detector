@@ -11,7 +11,9 @@ host = "localhost"
 port = 4455
 password = ""
 # Match-end detection does not need a high rate. Above ~10Hz you are paying
-# OBS's graphics thread for nothing.
+# OBS's graphics thread for nothing. Below ~2Hz a brief winning marker can
+# never accumulate agreement_frames. Everything in this section is editable
+# live from the config page and written back here.
 poll_hz = 5.0
 
 [server]
@@ -21,6 +23,7 @@ port = 6600
 ui_port = 6601
 
 [confirmer]
+# Every value in this section is editable live from the config page.
 # Consecutive agreeing frames required before an event fires.
 agreement_frames = 3
 # Safety valve: release cooldown after this long without seeing character

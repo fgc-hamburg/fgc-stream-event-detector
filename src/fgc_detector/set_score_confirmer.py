@@ -75,6 +75,17 @@ class SetScoreConfirmer:
         self._game = game
         self._reset()
 
+    def configure(self, config: ConfirmerConfig) -> None:
+        """Adopt new thresholds without restarting.
+
+        The partial streak goes -- it was counted against the old bar -- but
+        the baseline stays: it is the score this set is being measured
+        against, not a threshold, and losing it would silently swallow the
+        next game won.
+        """
+        self._config = config
+        self._clear_streak()
+
     def _reset(self) -> None:
         self._baseline = None
         self._clear_streak()

@@ -1,7 +1,7 @@
 """Picks the confirmation strategy for a game.
 
 Two strategies exist today, both exposing the same interface (observe/arm/
-disarm/set_game/state/armed/game): `Confirmer` (the marker/round path, the
+disarm/set_game/configure/state/armed/game): `Confirmer` (the marker/round path, the
 default) and `SetScoreConfirmer` (the SF6 games-won-in-set counter path).
 This is a deliberately small, explicit map -- generalizing this into a
 detector-declared strategy is a follow-up (see docs/TODO.md), not something
@@ -14,8 +14,8 @@ from .confirmer import Confirmer, ConfirmerConfig
 from .set_score_confirmer import SetScoreConfirmer
 from .types import Game
 
-# Both strategies expose the same interface (observe/arm/disarm/set_game/state/
-# armed/game); consumers that hold "a confirmer" without caring which strategy
+# Both strategies expose the same interface (observe/arm/disarm/set_game/
+# configure/state/armed/game); consumers that hold "a confirmer" without caring which strategy
 # it is should type-hint with this alias rather than the concrete `Confirmer`.
 ConfirmerLike = Confirmer | SetScoreConfirmer
 

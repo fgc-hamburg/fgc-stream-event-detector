@@ -16,7 +16,7 @@ from pathlib import Path
 
 import cv2
 
-from .config import ConfigError, load_config, save_config
+from .config import AppConfig, ConfigError, ObsConfig, load_config, save_config
 from .confirmation import ConfirmerLike, make_confirmer
 from .confirmer import ConfirmerConfig
 from .detectors.registry import UnknownGameError, get_detector
@@ -25,7 +25,7 @@ from .frames.offline import VideoFrameSource
 from .observability import FireRecorder
 from .pipeline import run_offline
 from .server import EventServer
-from .types import Game, RuntimeSettings
+from .types import Game
 from .ui.http import serve_ui
 
 log = logging.getLogger(__name__)
@@ -235,6 +235,35 @@ async def _pump(
         source.stop()
 
 
+def _retune_capture(
+    source: ObsFrameSource, previous: ObsConfig, current: ObsConfig
+) -> None:
+    """Push a changed capture configuration into the running frame source.
+
+    Called on every config change, including ones that have nothing to do
+    with capture, so each setting is forwarded only when it actually differs:
+    rebuilding the OBS client on an unrelated edit would drop a working
+    connection mid-set. Host, port and password are one unit -- they are only
+    expressible as a client factory, so any of them changing means a
+    reconnect.
+    """
+    changes: dict[str, object] = {}
+    if (previous.host, previous.port, previous.password) != (
+        current.host,
+        current.port,
+        current.password,
+    ):
+        changes["client_factory"] = default_client_factory(
+            current.host, current.port, current.password
+        )
+    if previous.source_name != current.source_name:
+        changes["source_name"] = current.source_name
+    if previous.poll_hz != current.poll_hz:
+        changes["poll_hz"] = current.poll_hz
+    if changes:
+        source.reconfigure(**changes)
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     detector = get_detector(config.game)
@@ -247,9 +276,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
         canonical=detector.canonical_size,
         poll_hz=config.obs.poll_hz,
     )
-    def persist(settings: RuntimeSettings) -> None:
+    live = config
+
+    def on_config_changed(updated: AppConfig) -> None:
+        # `live` tracks what the frame source is actually running, so a
+        # sequence of edits is applied incrementally rather than each one
+        # being diffed against the config that was loaded at startup.
+        nonlocal live
+        _retune_capture(source, live.obs, updated.obs)
+        live = updated
         try:
-            save_config(args.config, config.with_runtime(settings))
+            save_config(args.config, updated)
         except OSError as exc:
             # A read-only config file must not take the detector down mid-set.
             log.error("could not persist settings: %s", exc)
@@ -259,8 +296,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         host=config.server.host,
         port=config.server.port,
         obs_connected_getter=lambda: source.connected,
-        settings=config.runtime,
-        on_settings_changed=persist,
+        config=config,
+        on_config_changed=on_config_changed,
     )
     recorder = FireRecorder(Path("evidence"))
 

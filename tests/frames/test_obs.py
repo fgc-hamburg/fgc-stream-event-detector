@@ -292,3 +292,70 @@ def test_a_capture_slower_than_the_interval_does_not_sleep_at_all():
     next(frames)
 
     assert sleeps == []
+
+
+# --- live reconfiguration ---------------------------------------------------
+
+
+def test_reconfigure_changes_the_source_name_used_for_the_next_capture():
+    source, factory = _source([_data_uri(), _data_uri()])
+    frames = source.frames()
+    next(frames)
+    source.reconfigure(source_name="Other Capture")
+    next(frames)
+    names = [call[0] for call in factory.clients[0].calls]
+    assert names == ["Game Capture", "Other Capture"]
+
+
+def test_reconfigure_retunes_the_poll_interval():
+    sleeps: list[float] = []
+    now = [0.0]
+    source, _ = _source(
+        [_data_uri(), _data_uri(), _data_uri()],
+        sleeper=lambda seconds: sleeps.append(seconds),
+        poll_hz=10.0,  # 0.1s
+        clock=lambda: now[0],
+    )
+    frames = source.frames()
+    next(frames)
+    source.reconfigure(poll_hz=2.0)  # 0.5s
+    next(frames)
+    assert sleeps == [pytest.approx(0.5)]
+
+
+def test_reconfigure_rejects_a_non_positive_poll_rate_and_keeps_the_old_one():
+    source, _ = _source([_data_uri()])
+    with pytest.raises(ValueError):
+        source.reconfigure(poll_hz=0)
+    assert source._interval == pytest.approx(0.2)  # the 5Hz default, untouched
+
+
+def test_a_new_client_factory_is_adopted_on_the_next_capture():
+    source, first_factory = _source([_data_uri(), _data_uri()])
+    frames = source.frames()
+    next(frames)
+    second_factory = RecordingClientFactory([_data_uri()])
+
+    source.reconfigure(client_factory=second_factory)
+    # The swap is staged, not performed here: reconfigure() is called from the
+    # websocket thread while frames() may be mid-capture on another. Touching
+    # the live client from here would tear it out from under that call.
+    assert second_factory.call_count == 0
+    assert first_factory.clients[0].disconnected is False
+
+    next(frames)
+    assert second_factory.call_count == 1
+    assert first_factory.clients[0].disconnected is True
+
+
+def test_reconnecting_after_a_factory_swap_uses_the_new_factory():
+    """The old factory must not be consulted again — otherwise a corrected
+    password would be forgotten the first time the connection dropped."""
+    source, first_factory = _source([_data_uri()])
+    frames = source.frames()
+    next(frames)
+    second_factory = RecordingClientFactory([ConnectionError("bad auth"), _data_uri()])
+    source.reconfigure(client_factory=second_factory)
+    next(frames)
+    assert first_factory.call_count == 1
+    assert second_factory.call_count == 2

@@ -1,6 +1,7 @@
 import pytest
 
-from fgc_detector.config import load_config, save_config
+from fgc_detector.config import ObsConfig, load_config, save_config
+from fgc_detector.confirmer import ConfirmerConfig
 from fgc_detector.detectors.registry import NullDetector, available_games, register
 from fgc_detector.events import (
     ConfigEvent,
@@ -93,6 +94,8 @@ def test_config_event_serializes_capabilities_and_selections():
         ),
         available_games=[Game.SF6, Game.TEKKEN8],
         supported_events=frozenset({EventType.MATCH_END}),
+        obs=ObsConfig(source_name="Game Capture", password="hunter2"),
+        confirmer=ConfirmerConfig(),
         ts=TS,
     )
     assert event.to_dict() == {
@@ -102,8 +105,55 @@ def test_config_event_serializes_capabilities_and_selections():
         "enabled_events": ["match_end"],
         "available_games": ["sf6", "tekken8"],
         "supported_events": ["match_end"],
+        "obs": {
+            "source_name": "Game Capture",
+            "host": "localhost",
+            "port": 4455,
+            "poll_hz": 5.0,
+            "password_set": True,
+        },
+        "confirmer": {
+            "agreement_frames": 3,
+            "cooldown_max_seconds": 180.0,
+            "streak_staleness_seconds": 3.0,
+        },
         "ts": "2026-07-21T20:00:00Z",
     }
+
+
+def test_config_event_never_carries_the_obs_password():
+    """Every connected client sees this event. The password is write-only:
+    the page reports whether one is set and nothing more."""
+    event = ConfigEvent(
+        settings=RuntimeSettings(
+            active_game=Game.SF6,
+            enabled_games=frozenset({Game.SF6}),
+            enabled_events=frozenset(),
+        ),
+        available_games=[Game.SF6],
+        supported_events=frozenset(),
+        obs=ObsConfig(source_name="Game Capture", password="hunter2"),
+        confirmer=ConfirmerConfig(),
+        ts=TS,
+    )
+    assert "hunter2" not in event.to_json()
+    assert event.to_dict()["obs"]["password_set"] is True
+
+
+def test_config_event_reports_an_unset_password():
+    event = ConfigEvent(
+        settings=RuntimeSettings(
+            active_game=Game.SF6,
+            enabled_games=frozenset({Game.SF6}),
+            enabled_events=frozenset(),
+        ),
+        available_games=[Game.SF6],
+        supported_events=frozenset(),
+        obs=ObsConfig(source_name="Game Capture", password=""),
+        confirmer=ConfirmerConfig(),
+        ts=TS,
+    )
+    assert event.to_dict()["obs"]["password_set"] is False
 
 
 def test_parse_get_config():

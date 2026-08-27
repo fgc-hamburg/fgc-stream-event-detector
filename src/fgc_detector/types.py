@@ -43,6 +43,8 @@ class Command(StrEnum):
     GET_CONFIG = "get_config"
     SET_ENABLED_GAMES = "set_enabled_games"
     SET_ENABLED_EVENTS = "set_enabled_events"
+    SET_CAPTURE = "set_capture"
+    SET_CONFIRMER = "set_confirmer"
 
 
 #: Event types that carry detection results and may therefore be filtered.

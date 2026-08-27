@@ -468,3 +468,53 @@ def test_detector_misreading_win_screen_as_fresh_game_fires_phantom_duplicate(dr
     driver.feed(_match_end(Side.P1), 3)
     assert len(driver.events) == 2
     assert driver.events[1].winner is Side.P1
+
+
+# --- live reconfiguration ---------------------------------------------------
+
+
+def test_configure_raises_the_bar_mid_streak():
+    """A streak gathered under the old threshold must not be allowed to fire
+    against the new one: the operator raised the bar because they did not
+    trust those frames."""
+    confirmer = Confirmer(Game.AVATAR, ConfirmerConfig(agreement_frames=3))
+    confirmer.arm()
+    driver = Driver(confirmer)
+    driver.feed(_in_match()).feed(_match_end(Side.P1), times=2)
+
+    confirmer.configure(ConfirmerConfig(agreement_frames=3))
+    driver.feed(_match_end(Side.P1))
+    assert driver.events == []
+
+
+def test_configure_takes_effect_for_the_next_streak():
+    confirmer = Confirmer(Game.AVATAR, ConfirmerConfig(agreement_frames=3))
+    confirmer.arm()
+    confirmer.configure(ConfirmerConfig(agreement_frames=2))
+    driver = Driver(confirmer)
+    driver.feed(_in_match()).feed(_match_end(Side.P1), times=2)
+    assert len(driver.events) == 1
+
+
+def test_configure_keeps_the_confirmer_armed():
+    """Retuning a threshold mid-set must not silently take the detector
+    off-air; only arm/disarm change armedness."""
+    confirmer = Confirmer(Game.AVATAR, ConfirmerConfig())
+    confirmer.arm()
+    confirmer.configure(ConfirmerConfig(agreement_frames=4))
+    assert confirmer.armed is True
+
+
+def test_configure_does_not_release_an_active_cooldown():
+    """Cooldown is what stops a second event firing on the same match end.
+    Dropping it because a threshold was edited would re-fire the match."""
+    confirmer = Confirmer(Game.AVATAR, ConfirmerConfig(agreement_frames=2))
+    confirmer.arm()
+    driver = Driver(confirmer)
+    driver.feed(_in_match()).feed(_match_end(Side.P1), times=2)
+    assert confirmer.state is ConfirmerState.COOLDOWN
+
+    confirmer.configure(ConfirmerConfig(agreement_frames=2))
+    assert confirmer.state is ConfirmerState.COOLDOWN
+    driver.feed(_match_end(Side.P1), times=3)
+    assert len(driver.events) == 1

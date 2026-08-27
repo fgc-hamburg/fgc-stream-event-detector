@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from fgc_detector import cli as cli_module
-from fgc_detector.cli import _pump, main
+from fgc_detector.cli import _pump, _retune_capture, main
 from fgc_detector.confirmer import Confirmer, ConfirmerConfig
 from fgc_detector.detectors.registry import NullDetector, register
 from fgc_detector.types import Frame, Game
@@ -296,3 +296,72 @@ def test_cancelling_the_pump_lets_asyncio_run_shut_down_promptly():
         raise result["error"]
     assert source._stopped is True
     assert result["duration"] < 2.0
+
+
+# --- live capture retuning --------------------------------------------------
+
+
+class RecordingSource:
+    """Captures what reconfigure() was asked to change."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def reconfigure(self, **kwargs) -> None:
+        self.calls.append(kwargs)
+
+
+def _obs(**overrides):
+    from fgc_detector.config import ObsConfig
+
+    base = {
+        "source_name": "Game Capture",
+        "host": "localhost",
+        "port": 4455,
+        "password": "",
+        "poll_hz": 5.0,
+    }
+    return ObsConfig(**{**base, **overrides})
+
+
+def test_retune_capture_does_nothing_when_nothing_changed():
+    """A set_game or event-filter edit persists the whole config, so this is
+    called on every change. Rebuilding the OBS client each time would drop
+    the connection for edits that have nothing to do with capture."""
+    source = RecordingSource()
+    _retune_capture(source, _obs(), _obs())
+    assert source.calls == []
+
+
+def test_retune_capture_passes_a_new_poll_rate_without_reconnecting():
+    source = RecordingSource()
+    _retune_capture(source, _obs(), _obs(poll_hz=9.0))
+    assert source.calls == [{"poll_hz": 9.0}]
+
+
+def test_retune_capture_passes_a_new_source_name_without_reconnecting():
+    source = RecordingSource()
+    _retune_capture(source, _obs(), _obs(source_name="Other"))
+    assert source.calls == [{"source_name": "Other"}]
+
+
+@pytest.mark.parametrize(
+    "change", [{"host": "10.0.0.2"}, {"port": 4456}, {"password": "hunter2"}]
+)
+def test_a_changed_connection_detail_rebuilds_the_client(change):
+    source = RecordingSource()
+    _retune_capture(source, _obs(), _obs(**change))
+    assert list(source.calls[0]) == ["client_factory"]
+
+
+def test_the_rebuilt_client_factory_uses_the_new_connection_details(monkeypatch):
+    built = {}
+
+    def fake_factory(host, port, password):
+        built.update(host=host, port=port, password=password)
+        return lambda: object()
+
+    monkeypatch.setattr(cli_module, "default_client_factory", fake_factory)
+    source = RecordingSource()
+    _retune_capture(source, _obs(), _obs(host="10.0.0.2", port=4456, password="hunter2"))
+    assert built == {"host": "10.0.0.2", "port": 4456, "password": "hunter2"}

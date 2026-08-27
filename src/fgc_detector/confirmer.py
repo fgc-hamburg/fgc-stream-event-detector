@@ -83,13 +83,28 @@ class Confirmer:
         self._game = game
         self._reset()
 
-    def _reset(self) -> None:
-        self._state = ConfirmerState.IDLE
+    def configure(self, config: ConfirmerConfig) -> None:
+        """Adopt new thresholds without restarting.
+
+        Any partial streak is discarded: it was gathered under the old
+        thresholds, and letting it count towards a bar the operator just
+        raised is exactly what they were trying to prevent. Armedness and an
+        active cooldown survive -- neither is a threshold, and dropping the
+        cooldown would let the match that just ended fire a second event.
+        """
+        self._config = config
+        self._clear_streaks()
+
+    def _clear_streaks(self) -> None:
         self._streak.clear()
         self._streak_last_ts = None
-        self._cooldown_started = None
         self._zero_streak.clear()
         self._zero_streak_last_ts = None
+
+    def _reset(self) -> None:
+        self._state = ConfirmerState.IDLE
+        self._cooldown_started = None
+        self._clear_streaks()
 
     def observe(self, observation: Observation, now: datetime) -> MatchEndEvent | None:
         """Feed one observation. Returns an event only when one is confirmed."""

@@ -1,9 +1,18 @@
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from fgc_detector.config import ConfigError, load_config
+from fgc_detector.config import (
+    ConfigError,
+    ObsConfig,
+    apply_capture,
+    apply_confirmer,
+    load_config,
+)
+from fgc_detector.confirmer import ConfirmerConfig
+from fgc_detector.events import SetCaptureCommand, SetConfirmerCommand
 from fgc_detector.types import EventType, Game
 
 EXAMPLE_CONFIG = Path(__file__).resolve().parent.parent / "config.example.toml"
@@ -120,3 +129,60 @@ def test_example_config_loads_cleanly_with_documented_defaults():
         {Game.SF6, Game.TEKKEN8, Game.AVATAR, Game.TOKON}
     )
     assert config.runtime.enabled_events == frozenset({EventType.MATCH_END})
+
+
+# --- live edits from the control panel --------------------------------------
+
+
+def test_obs_config_rejects_a_non_positive_poll_rate():
+    with pytest.raises(ValueError):
+        ObsConfig(source_name="Game Capture", poll_hz=0)
+
+
+def test_obs_config_rejects_a_port_outside_the_valid_range():
+    with pytest.raises(ValueError):
+        ObsConfig(source_name="Game Capture", port=70000)
+
+
+def test_obs_config_rejects_an_empty_source_name():
+    with pytest.raises(ValueError):
+        ObsConfig(source_name="")
+
+
+def test_apply_capture_changes_only_the_fields_that_were_sent():
+    before = ObsConfig(
+        source_name="Game Capture", host="localhost", port=4455,
+        password="hunter2", poll_hz=5.0,
+    )
+    after = apply_capture(before, SetCaptureCommand(poll_hz=9.0))
+    assert after.poll_hz == 9.0
+    assert after == replace(before, poll_hz=9.0)
+
+
+def test_apply_capture_leaves_the_password_alone_when_it_is_absent():
+    before = ObsConfig(source_name="Game Capture", password="hunter2")
+    after = apply_capture(before, SetCaptureCommand(host="10.0.0.2"))
+    assert after.password == "hunter2"
+
+
+def test_apply_capture_clears_the_password_when_sent_empty():
+    before = ObsConfig(source_name="Game Capture", password="hunter2")
+    after = apply_capture(before, SetCaptureCommand(password=""))
+    assert after.password == ""
+
+
+def test_apply_capture_rejects_an_invalid_value():
+    before = ObsConfig(source_name="Game Capture")
+    with pytest.raises(ValueError):
+        apply_capture(before, SetCaptureCommand(poll_hz=-1.0))
+
+
+def test_apply_confirmer_changes_only_the_fields_that_were_sent():
+    before = ConfirmerConfig()
+    after = apply_confirmer(before, SetConfirmerCommand(agreement_frames=6))
+    assert after == replace(before, agreement_frames=6)
+
+
+def test_apply_confirmer_rejects_an_invalid_value():
+    with pytest.raises(ValueError):
+        apply_confirmer(ConfirmerConfig(), SetConfirmerCommand(agreement_frames=0))
