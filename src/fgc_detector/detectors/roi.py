@@ -132,6 +132,35 @@ def pale_fill_ratio(
     return float(np.count_nonzero(mask) / mask.size)
 
 
+def region_deviation_fraction(
+    image: np.ndarray,
+    a: Roi,
+    b: Roi,
+    *,
+    threshold: int = 30,
+) -> float:
+    """Fraction of `a`'s pixels that differ from `b`'s mean colour by `threshold`.
+
+    Where ``region_difference`` compares two region *means*, this compares each
+    of `a`'s pixels against `b`'s mean and reports how much of `a` stands out.
+    The distinction matters when `a` is mostly background with a small mark on
+    it: averaging dilutes the mark until it vanishes, while counting the pixels
+    it covers does not. Use it to ask "how much of this region is covered by
+    something that is not its surroundings?"
+
+    Like every primitive here it is background-*relative* -- a stage or overlay
+    tinting both regions equally cancels out -- and degrades to 0.0 when either
+    ROI falls outside the frame.
+    """
+    patch_a = a.crop(image)
+    patch_b = b.crop(image)
+    if patch_a.size == 0 or patch_b.size == 0:
+        return 0.0
+    mean_b = patch_b.reshape(-1, patch_b.shape[-1]).mean(axis=0)
+    deviation = np.abs(patch_a.reshape(-1, patch_a.shape[-1]) - mean_b).mean(axis=1)
+    return float(np.count_nonzero(deviation > threshold) / deviation.size)
+
+
 def region_difference(image: np.ndarray, a: Roi, b: Roi) -> float:
     """How different two regions look, as 0.0 (identical) to 1.0 (black vs white).
 
