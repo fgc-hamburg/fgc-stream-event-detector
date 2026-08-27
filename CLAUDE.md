@@ -196,6 +196,15 @@ server are game-agnostic and you rarely touch them.
   state, anything that covers an empty slot (a sprite, a flash, the HUD vanishing) reads as lit —
   and enough of those name a false winner. Require **positive evidence of the lit marker** as well,
   and resolve anything that is neither to `UNKNOWN`. See `tokon.py` and its calibration report.
+- **Measure the live capture rate against a source that is actually decoding.** A screenshot of an
+  idle or paused OBS source is an order of magnitude cheaper than one of a source mid-playback, so
+  a rate measured on a static frame is worthless. The historical trap: requesting **PNG** cost
+  1128ms/frame at 1280x720 against JPEG q=80's 104ms, because lossless compression of a noisy game
+  frame is expensive *inside OBS*. That was the difference between ~1Hz and ~9Hz — and below ~2Hz
+  no brief match-end marker can ever accumulate `agreement_frames`. `ObsFrameSource` now requests
+  JPEG and logs the rate it achieves; `capture` still requests PNG because ROIs are *measured* from
+  those frames. If you change the capture format, re-validate it by re-encoding every committed
+  corpus frame and re-running its detector.
 - **The winning marker may only be on screen for ~1 second.** TOKON hides the HUD for the KO
   cinematic and brings it back with the final pip lit for 0.8–1.4 s. Measure that window during
   calibration: it sets the floor on `obs.poll_hz` for that game.

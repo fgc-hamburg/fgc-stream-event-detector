@@ -34,17 +34,22 @@ full-resolution footage. Fixed and re-measured in
 `docs/superpowers/reports/2026-08-27-tokon-recalibration.md`, and `samples/tokon/` now carries 27
 native frames (`scripts/build_tokon_native_corpus.py`) so the corpus spans two unrelated captures.
 
-## ObsFrameSource achieves less than the configured poll_hz (open, 2026-08-27)
+## ObsFrameSource achieves less than the configured poll_hz (RESOLVED, 2026-08-27)
 
-`ObsFrameSource.frames()` sleeps a full `1/poll_hz` *after* each capture returns, so the achieved
-period is `capture_latency + 1/poll_hz`, never `1/poll_hz`. Measured against a live OBS: 6.16 Hz
-achieved at `poll_hz = 10.0` (50ms capture latency at 1280x720; 1.7s at 1920x1080, so request size
-matters a lot). `poll_hz` therefore does not mean what `config.example.toml` says it means, and the
-shortfall is invisible to the operator.
+Fixed. Two compounding causes, both found only after measuring against a source that was actually
+decoding — an earlier 6.16 Hz measurement was taken against a static black frame and was worthless.
+The real live figure was **0.95 Hz** at `poll_hz = 10.0`, which made every TOKON match end
+undetectable (3 agreeing frames need 2.10s; the longest win window is 1.20s).
 
-This bites games whose winning marker is on screen only briefly — TOKON's shortest observed win window is
-0.58s, which yields 4.6 samples at 6.16Hz but 6.8 at a true 10Hz. Fix: pace against a deadline
-(sleep the *remainder* of the interval) and log the achieved rate at startup.
+1. Screenshots were requested as **PNG**. Lossless compression of a noisy game frame is expensive
+   inside OBS and dominates while OBS is also decoding: 1128ms vs JPEG q=80's 104ms at 1280x720.
+   Now JPEG q=80, validated against every committed corpus. `capture` still uses PNG — ROIs are
+   measured from those frames.
+2. `frames()` slept a full `1/poll_hz` **after** each capture, making the period
+   `capture_latency + 1/poll_hz`. Now sleeps only the unused remainder of the interval.
+
+Result: 0.95 Hz -> 8.64 Hz. The source now logs its achieved rate after 20 captures and warns below
+half the configured `poll_hz`, so a shortfall is visible instead of silent.
 
 ## replay ignores config.toml (open, 2026-08-27)
 

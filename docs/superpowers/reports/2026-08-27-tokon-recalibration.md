@@ -130,21 +130,51 @@ the footage, not a detector defect.
 Regression on the original VOD (`TOKON.mp4`): the same five events with
 identical confidences — 0.2078 p1, 0.1365 p2, 0.1947 p1, 0.1478 p2, 0.1718 p1.
 
-## 7. Live-rate requirement
+## 7. Live-rate requirement, and the capture cost that broke it
 
-Contiguous `MATCH_END` duration per window under the new test, and the samples
-that yields at the 6.16 Hz actually achieved against OBS:
+With the detector fixed, live detection still fired nothing unless the video
+was paused. That was a second, independent defect.
 
-| window | duration | samples @ 6.16 Hz |
-|---|---|---|
-| 2:25 | 1.20 s | 8.4 |
-| 11:15 | **0.58 s** | **4.6** |
-| 15:14 | 0.78 s | 5.8 |
+**Measure the capture rate against a source that is actually decoding.** An
+earlier measurement of 6.16 Hz was taken while the OBS source showed a static
+black frame and was worthless. Against a playing 1080p60 source the real
+figure was **0.95 Hz** — three agreeing frames need 2.10 s of continuous
+window, and the longest window is 1.20 s, so every match end was missed.
+Pausing "worked" only because a frozen frame accumulates agreement for free.
 
-**`confirmer.agreement_frames` must stay at 3 for TOKON.** At 5 the 11:15
-window is missed live. Note also that the achieved rate is below the configured
-`poll_hz` — `ObsFrameSource.frames()` sleeps a full `1/poll_hz` *after* each
-capture, so the period is `capture_latency + 1/poll_hz` (see `docs/TODO.md`).
+Two compounding causes, both now fixed:
+
+1. **PNG screenshots.** Lossless compression of a noisy game frame is
+   expensive *inside OBS* and dominates while OBS is also decoding. Measured
+   on a live source at 1280×720: **PNG 1128 ms vs JPEG q=80 104 ms**, an 11×
+   difference. `ObsFrameSource` now requests JPEG q=80. `fgc-detect capture`
+   still requests PNG, because ROIs are *measured* from those frames.
+2. **Pacing.** `frames()` slept a full `1/poll_hz` *after* each capture, so the
+   achieved period was `capture_latency + 1/poll_hz` and `poll_hz` was a rate
+   the source could never reach. It now sleeps only the unused remainder.
+
+Together: **0.95 Hz → 8.64 Hz** at `poll_hz = 10.0`, measured end-to-end
+through `ObsFrameSource` against the playing source.
+
+JPEG safety was checked hermetically by re-encoding every committed corpus
+frame at q=90/80/70 and re-running its detector. At q=80, **no frame** in the
+TOKON, Avatar or SF6 corpora changed its reported screen, winner or counts.
+The only movement at other qualities was `UNKNOWN → IN_MATCH 0-0` on
+HUD-absent TOKON frames — the benign direction the corpus test already allows,
+and never a spurious `MATCH_END`.
+
+Contiguous `MATCH_END` duration per window under the new lit test:
+
+| window | duration | samples @ 0.95 Hz (before) | samples @ 8.64 Hz (after) |
+|---|---|---|---|
+| 2:25 | 1.20 s | 2.1 ✗ | 11.4 |
+| 11:15 | **0.58 s** | 1.6 ✗ | 6.0 |
+| 15:14 | 0.78 s | 1.7 ✗ | 7.7 |
+
+`confirmer.agreement_frames = 3` now has 2–3.8× margin on every window. The
+source logs the rate it actually achieves after 20 captures, and warns when
+that falls below half the configured `poll_hz`, so this cannot go unnoticed
+again.
 
 ## 8. Corpus
 
