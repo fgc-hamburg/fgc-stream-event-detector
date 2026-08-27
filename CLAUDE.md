@@ -57,7 +57,13 @@ e.g. `tests/detectors/test_avatar_corpus.py`, which runs the detector over commi
    ```
 4. `uv run fgc-detect run --config config.toml` — serves events on `ws://127.0.0.1:6600`, config UI
    on `http://127.0.0.1:6601`.
-5. The confirmer starts **disarmed**; send `{"cmd":"arm"}` over the WebSocket (the dashboard does
+5. The config page also edits `[obs]` (source name, host, port, password) and the tuning knobs
+   (`poll_hz`, the three `[confirmer]` thresholds) live over the WebSocket — `set_capture` /
+   `set_confirmer`, both partial edits where an omitted field means "unchanged". Changes reach the
+   running `ObsFrameSource`/confirmer and are written back to `config.toml`. The password is
+   write-only: `config` events report `obs.password_set`, never the value, and `"password":""` is
+   the only way to clear it.
+6. The confirmer starts **disarmed**; send `{"cmd":"arm"}` over the WebSocket (the dashboard does
    this) or nothing fires. `status` frames report `obs_connected` / `armed` / `state` so you can
    confirm OBS is seen before a match ends.
 

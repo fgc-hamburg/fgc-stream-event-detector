@@ -15,6 +15,10 @@
   button { font: inherit; padding: .3rem .9rem; border-radius: 6px; }
   #error { color: #c33; min-height: 1.5em; }
   .hint { color: #8889; font-size: .85rem; margin: .2rem 0 0; }
+  .field { display: grid; grid-template-columns: 10rem 1fr; gap: .4rem;
+           align-items: center; padding: .15rem 0; }
+  .field input { font: inherit; padding: .2rem .4rem; min-width: 0; }
+  input:invalid { outline: 1px solid #c33; }
 </style>
 
 <h1>FGC Stream Event Detector</h1>
@@ -44,6 +48,64 @@
   <legend>Enabled games</legend>
   <div id="enabled"></div>
   <p class="hint">The roster offered above. The active game cannot be disabled.</p>
+</fieldset>
+
+<fieldset>
+  <legend>OBS connection</legend>
+  <form id="capture-form">
+    <label class="field">Source name
+      <input id="source_name" required>
+    </label>
+    <label class="field">Host
+      <input id="host" required>
+    </label>
+    <label class="field">Port
+      <input id="port" type="number" min="1" max="65535" step="1" required>
+    </label>
+    <label class="field">Password
+      <input id="password" type="password" placeholder="unchanged" autocomplete="off">
+    </label>
+    <label class="field">Poll rate (Hz)
+      <input id="poll_hz" type="number" min="0.1" max="60" step="0.1" required>
+    </label>
+    <p class="row" style="margin-top:.8rem">
+      <button type="submit">Apply</button>
+      <span id="password-state" class="pill">password ?</span>
+    </p>
+  </form>
+  <p class="hint">
+    Applied to the running capture immediately; a changed host, port or
+    password reconnects to OBS. The password is never sent back to this page —
+    leave it blank to keep the stored one, or
+    <a href="#" id="clear-password">clear it</a>.
+  </p>
+  <p class="hint">
+    Poll rate is the ceiling, not a guarantee. A winning marker can be on
+    screen for under a second, so below ~2Hz a match end may never be
+    confirmed; the log reports the rate actually achieved.
+  </p>
+</fieldset>
+
+<fieldset>
+  <legend>Detection tuning</legend>
+  <form id="confirmer-form">
+    <label class="field">Agreement frames
+      <input id="agreement_frames" type="number" min="1" step="1" required>
+    </label>
+    <label class="field">Cooldown (s)
+      <input id="cooldown_max_seconds" type="number" min="0.1" step="0.1" required>
+    </label>
+    <label class="field">Streak staleness (s)
+      <input id="streak_staleness_seconds" type="number" min="0.1" step="0.1" required>
+    </label>
+    <p class="row" style="margin-top:.8rem"><button type="submit">Apply</button></p>
+  </form>
+  <p class="hint">
+    Agreement frames is how many consecutive frames must read the same before
+    an event fires — raise it against false positives, lower it if brief match
+    ends are being missed. Editing any of these discards a part-built streak
+    but leaves the detector armed.
+  </p>
 </fieldset>
 
 <fieldset>
@@ -87,7 +149,60 @@ socket.onmessage = (message) => {
   }
 };
 
+const setValue = (id, value) => {
+  const input = $(id);
+  // Never clobber a field the operator is part-way through typing into.
+  if (document.activeElement !== input) input.value = value;
+};
+
+function renderCapture() {
+  setValue("source_name", config.obs.source_name);
+  setValue("host", config.obs.host);
+  setValue("port", config.obs.port);
+  setValue("poll_hz", config.obs.poll_hz);
+  pill($("password-state"),
+       config.obs.password_set ? "password set" : "no password",
+       config.obs.password_set);
+  for (const key of ["agreement_frames", "cooldown_max_seconds",
+                     "streak_staleness_seconds"]) {
+    setValue(key, config.confirmer[key]);
+  }
+}
+
+$("capture-form").onsubmit = (submission) => {
+  submission.preventDefault();
+  const payload = {
+    cmd: "set_capture",
+    source_name: $("source_name").value,
+    host: $("host").value,
+    port: Number($("port").value),
+    poll_hz: Number($("poll_hz").value),
+  };
+  // An omitted password means "keep the stored one" — the server never tells
+  // us what it is, so an empty box cannot mean anything else.
+  if ($("password").value) payload.password = $("password").value;
+  send(payload);
+  $("password").value = "";
+};
+
+$("clear-password").onclick = (click) => {
+  click.preventDefault();
+  send({ cmd: "set_capture", password: "" });
+  $("password").value = "";
+};
+
+$("confirmer-form").onsubmit = (submission) => {
+  submission.preventDefault();
+  send({
+    cmd: "set_confirmer",
+    agreement_frames: Number($("agreement_frames").value),
+    cooldown_max_seconds: Number($("cooldown_max_seconds").value),
+    streak_staleness_seconds: Number($("streak_staleness_seconds").value),
+  });
+};
+
 function render() {
+  renderCapture();
   $("active").innerHTML = "";
   for (const game of config.enabled_games) {
     const label = document.createElement("label");

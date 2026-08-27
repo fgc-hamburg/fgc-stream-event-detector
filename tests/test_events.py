@@ -8,6 +8,8 @@ from fgc_detector.events import (
     CommandError,
     DisarmCommand,
     MatchEndEvent,
+    SetCaptureCommand,
+    SetConfirmerCommand,
     SetGameCommand,
     StatusEvent,
     parse_command,
@@ -86,3 +88,68 @@ def test_malformed_json_is_rejected():
 def test_non_object_json_is_rejected():
     with pytest.raises(CommandError, match="JSON object"):
         parse_command('["arm"]')
+
+
+# --- set_capture / set_confirmer -------------------------------------------
+
+
+def test_parse_set_capture_with_every_field():
+    command = parse_command(
+        '{"cmd":"set_capture","source_name":"Cap","host":"10.0.0.2",'
+        '"port":4456,"poll_hz":8.5,"password":"hunter2"}'
+    )
+    assert command == SetCaptureCommand(
+        source_name="Cap", host="10.0.0.2", port=4456, poll_hz=8.5, password="hunter2"
+    )
+
+
+def test_omitted_capture_fields_parse_as_none_meaning_unchanged():
+    command = parse_command('{"cmd":"set_capture","poll_hz":2}')
+    assert command == SetCaptureCommand(poll_hz=2.0)
+
+
+def test_an_omitted_password_is_distinct_from_an_empty_one():
+    """Absent means 'keep the stored password'; empty means 'clear it'. The
+    UI never receives the current password, so it cannot echo one back, and
+    conflating these would wipe the password on every unrelated edit."""
+    assert parse_command('{"cmd":"set_capture","host":"a"}').password is None
+    assert parse_command('{"cmd":"set_capture","password":""}').password == ""
+
+
+def test_non_numeric_capture_values_are_rejected():
+    with pytest.raises(CommandError):
+        parse_command('{"cmd":"set_capture","port":"4455"}')
+    with pytest.raises(CommandError):
+        parse_command('{"cmd":"set_capture","poll_hz":"fast"}')
+
+
+def test_non_string_capture_text_is_rejected():
+    with pytest.raises(CommandError):
+        parse_command('{"cmd":"set_capture","host":5}')
+
+
+def test_booleans_are_not_accepted_as_numbers():
+    # bool is an int subclass in Python; a naive isinstance check would let
+    # {"port": true} through as port 1.
+    with pytest.raises(CommandError):
+        parse_command('{"cmd":"set_capture","port":true}')
+
+
+def test_parse_set_confirmer():
+    command = parse_command(
+        '{"cmd":"set_confirmer","agreement_frames":5,'
+        '"cooldown_max_seconds":90,"streak_staleness_seconds":2.5}'
+    )
+    assert command == SetConfirmerCommand(
+        agreement_frames=5, cooldown_max_seconds=90.0, streak_staleness_seconds=2.5
+    )
+
+
+def test_omitted_confirmer_fields_parse_as_none_meaning_unchanged():
+    command = parse_command('{"cmd":"set_confirmer","agreement_frames":4}')
+    assert command == SetConfirmerCommand(agreement_frames=4)
+
+
+def test_non_integer_agreement_frames_is_rejected():
+    with pytest.raises(CommandError):
+        parse_command('{"cmd":"set_confirmer","agreement_frames":2.5}')

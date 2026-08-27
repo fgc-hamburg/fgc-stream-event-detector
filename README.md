@@ -144,6 +144,11 @@ Connects to OBS, serves the WebSocket on `server.port`, and serves the config pa
 `http://127.0.0.1:6601`. Runtime settings changed via the UI or a command are persisted back to the
 config file. Ctrl-C shuts down cleanly.
 
+The config page also edits the OBS connection (source name, host, port, password) and the tuning
+knobs (`poll_hz`, and the three `[confirmer]` thresholds) while the detector is running: changes
+apply to the live capture and confirmer and are written back to `config.toml`. Only `[server]` needs
+a restart.
+
 ### `replay` — run a recorded VOD through the pipeline
 
 The offline path that validates the detector. No OBS needed.
@@ -195,8 +200,16 @@ The dashboard connects to `ws://<server.host>:<server.port>`. On connect it imme
 {"type":"status","game":"sf6","armed":true,"state":"live","obs_connected":true,"ts":"…Z"}
 {"type":"config","active_game":"sf6","enabled_games":["avatar","sf6","tekken8"],
  "enabled_events":["match_end"],"available_games":["avatar","sf6"],
- "supported_events":["match_end"],"ts":"…Z"}
+ "supported_events":["match_end"],
+ "obs":{"source_name":"Game Capture","host":"localhost","port":4455,"poll_hz":5.0,
+        "password_set":true},
+ "confirmer":{"agreement_frames":3,"cooldown_max_seconds":180.0,
+              "streak_staleness_seconds":3.0},
+ "ts":"…Z"}
 ```
+
+The OBS password is **never** published: `config` reports only whether one is stored
+(`obs.password_set`). Every connected client sees this event, so the password is write-only.
 
 `status` is pushed on connect and on every state change (`idle` / `live` / `cooldown`, arm/disarm,
 game switch, OBS connect/disconnect).
@@ -210,7 +223,21 @@ game switch, OBS connect/disconnect).
 {"cmd":"get_config"}                            // re-request the config event
 {"cmd":"set_enabled_games","games":["sf6"]}     // roster offered in the UI
 {"cmd":"set_enabled_events","events":["match_end"]}  // which events are delivered
+{"cmd":"set_capture","host":"localhost","port":4455,"password":"…",
+ "source_name":"Game Capture","poll_hz":5.0}       // OBS connection + capture rate
+{"cmd":"set_confirmer","agreement_frames":3,"cooldown_max_seconds":180.0,
+ "streak_staleness_seconds":3.0}                   // detection thresholds
 ```
+
+`set_capture` and `set_confirmer` take effect on the running detector — no restart. Every field of
+both is optional, and an omitted field is left unchanged, so the page can send only what the
+operator edited. That is what makes the password write-only: **omitting `password` keeps the stored
+one, and `"password":""` clears it.** Changing `host`, `port` or `password` reconnects to OBS;
+changing `source_name` or `poll_hz` does not. Editing a confirmer threshold discards any part-built
+agreement streak but leaves the detector armed and any cooldown intact.
+
+`server.host`, `server.port` and `server.ui_port` are not settable at runtime — a listening socket
+cannot be rebound under live clients. Edit `config.toml` and restart for those.
 
 Every command is answered with a fresh `status` + `config`. Unrecognized messages get
 `{"error":"…"}` and never take the server down.

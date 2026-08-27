@@ -69,6 +69,7 @@ class ObsFrameSource:
         self._captures = 0
         self._first_capture_at: float | None = None
         self._client: object | None = None
+        self._pending_factory: Callable[[], object] | None = None
         self._connected = False
         self._backoff = 0.5
         self._stopped = False
@@ -77,6 +78,51 @@ class ObsFrameSource:
     def connected(self) -> bool:
         return self._connected
 
+    def reconfigure(
+        self,
+        *,
+        client_factory: Callable[[], object] | None = None,
+        source_name: str | None = None,
+        poll_hz: float | None = None,
+    ) -> None:
+        """Adopt new capture settings without restarting the process.
+
+        Called from the websocket thread while `frames()` is running on
+        another, so it only *stages* the client swap: `_adopt_pending_factory`
+        performs it on the capture thread, at a point where no request is in
+        flight. Every argument is optional; `None` leaves that setting alone.
+        """
+        if poll_hz is not None:
+            if poll_hz <= 0:
+                raise ValueError(f"poll_hz must be > 0, got {poll_hz}")
+            self._poll_hz = poll_hz
+            self._interval = 1.0 / poll_hz
+            # The achieved-rate report compares against poll_hz, so a fresh
+            # target needs a fresh measurement window.
+            self._captures = 0
+            self._first_capture_at = None
+        if source_name is not None:
+            self._source_name = source_name
+        if client_factory is not None:
+            self._pending_factory = client_factory
+
+    def _adopt_pending_factory(self) -> None:
+        """Swap in a staged client factory and drop the client it replaces."""
+        factory = self._pending_factory
+        if factory is None:
+            return
+        self._pending_factory = None
+        self._client_factory = factory
+        stale_client = self._client
+        self._client = None
+        self._connected = False
+        self._backoff = 0.5
+        if stale_client is not None:
+            try:
+                stale_client.disconnect()
+            except Exception as exc:
+                log.debug("error disconnecting reconfigured OBS client: %s", exc)
+
     def _ensure_client(self) -> object:
         if self._client is None:
             self._client = self._client_factory()
@@ -84,6 +130,7 @@ class ObsFrameSource:
 
     def _attempt_once(self) -> Frame | None:
         """One capture attempt. Returns None on any failure, never raises."""
+        self._adopt_pending_factory()
         try:
             client = self._ensure_client()
             response = client.get_source_screenshot(

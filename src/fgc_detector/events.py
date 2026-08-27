@@ -9,9 +9,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from .types import Command, ConfirmerState, EventType, Game, RuntimeSettings, Side
+
+if TYPE_CHECKING:  # imported for typing only: both modules import this one.
+    from .config import ObsConfig
+    from .confirmer import ConfirmerConfig
 
 
 class CommandError(ValueError):
@@ -77,6 +81,8 @@ class ConfigEvent:
     settings: RuntimeSettings
     available_games: list[Game]
     supported_events: frozenset[EventType]
+    obs: "ObsConfig"
+    confirmer: "ConfirmerConfig"
     ts: datetime
 
     TYPE: ClassVar[EventType] = EventType.CONFIG
@@ -91,6 +97,21 @@ class ConfigEvent:
             ),
             "available_games": [item.value for item in self.available_games],
             "supported_events": sorted(item.value for item in self.supported_events),
+            "obs": {
+                "source_name": self.obs.source_name,
+                "host": self.obs.host,
+                "port": self.obs.port,
+                "poll_hz": self.obs.poll_hz,
+                # The password itself is never published: this event goes to
+                # every connected client, and the page only needs to know
+                # whether one is stored.
+                "password_set": bool(self.obs.password),
+            },
+            "confirmer": {
+                "agreement_frames": self.confirmer.agreement_frames,
+                "cooldown_max_seconds": self.confirmer.cooldown_max_seconds,
+                "streak_staleness_seconds": self.confirmer.streak_staleness_seconds,
+            },
             "ts": _iso(self.ts),
         }
 
@@ -131,6 +152,33 @@ class SetEnabledEventsCommand:
     events: frozenset[EventType]
 
 
+@dataclass(frozen=True)
+class SetCaptureCommand:
+    """A partial edit of the OBS capture settings.
+
+    Every field is optional and `None` means "leave it as it is", so the page
+    can send only what the operator changed. `password` therefore has three
+    states: `None` (absent -- keep the stored one), `""` (clear it), or a new
+    value. That is what lets the password stay write-only: the page is never
+    told the current password, so it could not echo one back.
+    """
+
+    source_name: str | None = None
+    host: str | None = None
+    port: int | None = None
+    poll_hz: float | None = None
+    password: str | None = None
+
+
+@dataclass(frozen=True)
+class SetConfirmerCommand:
+    """A partial edit of the confirmation thresholds. `None` means unchanged."""
+
+    agreement_frames: int | None = None
+    cooldown_max_seconds: float | None = None
+    streak_staleness_seconds: float | None = None
+
+
 ParsedCommand = (
     ArmCommand
     | DisarmCommand
@@ -138,6 +186,8 @@ ParsedCommand = (
     | GetConfigCommand
     | SetEnabledGamesCommand
     | SetEnabledEventsCommand
+    | SetCaptureCommand
+    | SetConfirmerCommand
 )
 
 
@@ -152,6 +202,36 @@ def _parse_enum_list(payload: dict, key: str, enum_type, label: str) -> frozense
         except ValueError as exc:
             raise CommandError(f"unknown {label}: {item!r}") from exc
     return frozenset(parsed)
+
+
+def _optional_str(payload: dict, key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise CommandError(f"'{key}' must be a string, got {type(value).__name__}")
+    return value
+
+
+def _optional_number(payload: dict, key: str, kind: type) -> int | float | None:
+    """Read an optional numeric field, rejecting anything not of `kind`.
+
+    A float field accepts a JSON integer (`"poll_hz": 2` is a perfectly good
+    2.0), but an integer field rejects a float: silently truncating
+    `agreement_frames: 2.5` would change the meaning of the setting. `bool` is
+    excluded explicitly because it subclasses `int`: without that check
+    `{"port": true}` would quietly become port 1.
+    """
+    value = payload.get(key)
+    if value is None:
+        return None
+    accepted: tuple[type, ...] = (int, float) if kind is float else (kind,)
+    if isinstance(value, bool) or not isinstance(value, accepted):
+        raise CommandError(
+            f"'{key}' must be {'an integer' if kind is int else 'a number'}, "
+            f"got {type(value).__name__}"
+        )
+    return kind(value)
 
 
 def parse_command(raw: str) -> ParsedCommand:
@@ -197,6 +277,24 @@ def parse_command(raw: str) -> ParsedCommand:
         case Command.SET_ENABLED_EVENTS:
             return SetEnabledEventsCommand(
                 _parse_enum_list(payload, "events", EventType, "event")
+            )
+        case Command.SET_CAPTURE:
+            return SetCaptureCommand(
+                source_name=_optional_str(payload, "source_name"),
+                host=_optional_str(payload, "host"),
+                port=_optional_number(payload, "port", int),
+                poll_hz=_optional_number(payload, "poll_hz", float),
+                password=_optional_str(payload, "password"),
+            )
+        case Command.SET_CONFIRMER:
+            return SetConfirmerCommand(
+                agreement_frames=_optional_number(payload, "agreement_frames", int),
+                cooldown_max_seconds=_optional_number(
+                    payload, "cooldown_max_seconds", float
+                ),
+                streak_staleness_seconds=_optional_number(
+                    payload, "streak_staleness_seconds", float
+                ),
             )
         case _:
             raise AssertionError(f"unhandled command {command}")

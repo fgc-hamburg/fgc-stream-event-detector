@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from fgc_detector.config import AppConfig, ObsConfig, ServerConfig
 from fgc_detector.confirmer import Confirmer, ConfirmerConfig
 from fgc_detector.server import EventServer
 from fgc_detector.types import ConfirmerState, EventType, Game, RuntimeSettings, Side
@@ -45,8 +46,14 @@ def server():
         host="127.0.0.1",
         port=0,
         obs_connected_getter=lambda: True,
-        settings=settings,
-        on_settings_changed=lambda _s: None,
+        config=AppConfig(
+            game=Game.SF6,
+            obs=ObsConfig(source_name="Game Capture"),
+            server=ServerConfig(),
+            confirmer=ConfirmerConfig(),
+            runtime=settings,
+        ),
+        on_config_changed=lambda _config: None,
     )
 
 

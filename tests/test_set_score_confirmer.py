@@ -265,3 +265,28 @@ def test_reported_confidence_is_the_confirming_frames_confidence(driver):
     driver.feed(_score(1, 0, confidence=0.5), 2)
     driver.feed(_score(1, 0, confidence=0.77), 1)
     assert driver.events[0].confidence == pytest.approx(0.77)
+
+
+def test_configure_raises_the_bar_mid_streak():
+    confirmer = SetScoreConfirmer(Game.SF6, ConfirmerConfig(agreement_frames=3))
+    confirmer.arm()
+    driver = Driver(confirmer)
+    driver.feed(_score(0, 0)).feed(_score(1, 0), times=2)
+
+    confirmer.configure(ConfirmerConfig(agreement_frames=3))
+    driver.feed(_score(1, 0))
+    assert driver.events == []
+
+
+def test_configure_keeps_the_baseline_so_the_set_is_not_restarted():
+    """The baseline is what a +1 is measured against. Losing it on a
+    threshold edit would make the next reading the new baseline, so the
+    game that had just been won would never be reported."""
+    confirmer = SetScoreConfirmer(Game.SF6, ConfirmerConfig(agreement_frames=2))
+    confirmer.arm()
+    driver = Driver(confirmer)
+    driver.feed(_score(0, 0), times=2)
+
+    confirmer.configure(ConfirmerConfig(agreement_frames=2))
+    driver.feed(_score(1, 0), times=2)
+    assert [event.winner for event in driver.events] == [Side.P1]

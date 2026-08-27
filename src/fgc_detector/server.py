@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 import websockets
 
+from .config import AppConfig, apply_capture, apply_confirmer
 from .confirmation import ConfirmerLike
 from .detectors.registry import available_games, get_detector
 from .events import (
@@ -25,6 +26,8 @@ from .events import (
     DisarmCommand,
     Event,
     GetConfigCommand,
+    SetCaptureCommand,
+    SetConfirmerCommand,
     SetEnabledEventsCommand,
     SetEnabledGamesCommand,
     SetGameCommand,
@@ -43,16 +46,22 @@ class EventServer:
         host: str,
         port: int,
         obs_connected_getter: Callable[[], bool],
-        settings: RuntimeSettings,
-        on_settings_changed: Callable[[RuntimeSettings], None],
+        config: AppConfig,
+        on_config_changed: Callable[[AppConfig], None],
     ) -> None:
         self.confirmer = confirmer
         self._host = host
         self._port = port
         self._obs_connected = obs_connected_getter
-        self.settings = settings
-        self._on_settings_changed = on_settings_changed
+        self.config = config
+        self._on_config_changed = on_config_changed
         self._clients: set[Any] = set()
+
+    @property
+    def settings(self) -> RuntimeSettings:
+        """The operator's selections. Read-only: go through `_apply` to change
+        them, so the confirmer and the config file cannot drift from them."""
+        return self.config.runtime
 
     def status_event(self, now: datetime) -> StatusEvent:
         return StatusEvent(
@@ -74,11 +83,13 @@ class EventServer:
             settings=self.settings,
             available_games=games,
             supported_events=supported_events,
+            obs=self.config.obs,
+            confirmer=self.config.confirmer,
             ts=now,
         )
 
-    def _apply(self, settings: RuntimeSettings) -> None:
-        """Adopt new settings, sync the confirmer, and persist.
+    def _apply_runtime(self, settings: RuntimeSettings) -> None:
+        """Adopt new operator selections and sync the confirmer.
 
         `set_game` only mutates the existing confirmer's `game` attribute; it
         does not rebuild it via `make_confirmer`. If `active_game` switches to
@@ -87,10 +98,21 @@ class EventServer:
         marker-based game), the confirmer silently keeps running the wrong
         strategy until restart. Not yet handled -- see docs/TODO.md.
         """
-        self.settings = settings
+        self._apply(self.config.with_runtime(settings))
         if self.confirmer.game is not settings.active_game:
             self.confirmer.set_game(settings.active_game)
-        self._on_settings_changed(settings)
+
+    def _apply(self, config: AppConfig) -> None:
+        """Adopt a new whole-config and hand it to the owner to act on.
+
+        The single write path: everything that changes settings builds the
+        new `AppConfig` first, so the callback (which persists it to disk and
+        retunes the live frame source) always sees the complete picture
+        rather than one section at a time. A rejected edit raises before
+        reaching here, so nothing is adopted or persisted.
+        """
+        self.config = config
+        self._on_config_changed(config)
 
     async def broadcast(self, event: Event) -> None:
         if not self.settings.allows(event.TYPE):
@@ -133,13 +155,23 @@ class EventServer:
                 case DisarmCommand():
                     self.confirmer.disarm()
                 case SetGameCommand(game=game):
-                    self._apply(replace(self.settings, active_game=game))
+                    self._apply_runtime(replace(self.settings, active_game=game))
                 case GetConfigCommand():
                     pass
                 case SetEnabledGamesCommand(games=games):
-                    self._apply(replace(self.settings, enabled_games=games))
+                    self._apply_runtime(replace(self.settings, enabled_games=games))
                 case SetEnabledEventsCommand(events=events):
-                    self._apply(replace(self.settings, enabled_events=events))
+                    self._apply_runtime(replace(self.settings, enabled_events=events))
+                case SetCaptureCommand():
+                    self._apply(
+                        replace(self.config, obs=apply_capture(self.config.obs, command))
+                    )
+                case SetConfirmerCommand():
+                    # Validation happens inside apply_confirmer, before either
+                    # the live confirmer or the stored config is touched.
+                    confirmer_config = apply_confirmer(self.config.confirmer, command)
+                    self.confirmer.configure(confirmer_config)
+                    self._apply(replace(self.config, confirmer=confirmer_config))
         except ValueError as exc:
             await socket.send(json.dumps({"error": str(exc)}))
             return
