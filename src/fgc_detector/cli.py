@@ -137,6 +137,11 @@ def _cmd_capture(args: argparse.Namespace) -> int:
         source_name=config.obs.source_name,
         canonical=detector.canonical_size,
         poll_hz=config.obs.poll_hz,
+        # Lossless: these frames are what ROIs and thresholds get *measured*
+        # from, so they must not carry compression artifacts. The live path
+        # trades that for rate; calibration cannot.
+        image_format="png",
+        image_quality=-1,
     )
     args.out.mkdir(parents=True, exist_ok=True)
     written = 0

@@ -34,7 +34,7 @@ class FakeClient:
         self.disconnected = False
 
     def get_source_screenshot(self, name, img_format, width, height, quality):
-        self.calls.append((name, img_format, width, height))
+        self.calls.append((name, img_format, width, height, quality))
         if not self._responses:
             raise StopIteration
         response = self._responses.pop(0)
@@ -215,3 +215,80 @@ def test_invalid_poll_rate_rejected():
             canonical=CANONICAL,
             poll_hz=0,
         )
+
+
+# --- capture format and pacing ---------------------------------------------
+
+
+def test_screenshots_are_requested_as_jpeg_by_default():
+    """PNG is what makes OBS slow, not the transfer.
+
+    Lossless compression of a noisy game frame costs OBS ~1.1s per 1280x720
+    frame while it is also decoding, against ~0.1s for JPEG. At ~1Hz a brief
+    match-end marker can never accumulate the confirmer's agreeing frames, so
+    the default has to be the cheap one.
+    """
+    source, factory = _source([_data_uri()])
+    next(source.frames())
+    _, img_format, _, _, quality = factory.clients[0].calls[0]
+    assert img_format == "jpg"
+    assert quality == 80
+
+
+def test_capture_format_and_quality_are_overridable():
+    """Calibration measures ROIs off these frames, so it needs them lossless."""
+    source, factory = _source([_data_uri()], image_format="png", image_quality=-1)
+    next(source.frames())
+    _, img_format, _, _, quality = factory.clients[0].calls[0]
+    assert img_format == "png"
+    assert quality == -1
+
+
+def test_pacing_sleeps_only_the_unused_remainder_of_the_interval():
+    """A capture that takes half the interval must be followed by half a sleep.
+
+    Sleeping the full interval after the capture would make the achieved
+    period `latency + 1/poll_hz`, so poll_hz would be a rate the source can
+    never actually reach.
+    """
+    sleeps: list[float] = []
+    now = [0.0]
+
+    def clock() -> float:
+        return now[0]
+
+    def capture_takes_40ms(_seconds: float) -> None:
+        sleeps.append(_seconds)
+
+    source, _ = _source(
+        [_data_uri(), _data_uri()],
+        sleeper=capture_takes_40ms,
+        poll_hz=10.0,  # 0.1s interval
+        clock=clock,
+    )
+    frames = source.frames()
+    next(frames)
+    now[0] += 0.04  # the capture and the consumer's work took 40ms
+    next(frames)
+
+    assert sleeps == [pytest.approx(0.06)]
+
+
+def test_a_capture_slower_than_the_interval_does_not_sleep_at_all():
+    """Falling behind must degrade to 'as fast as possible', never to a
+    negative sleep or a backwards deadline."""
+    sleeps: list[float] = []
+    now = [0.0]
+
+    source, _ = _source(
+        [_data_uri(), _data_uri()],
+        sleeper=lambda seconds: sleeps.append(seconds),
+        poll_hz=10.0,
+        clock=lambda: now[0],
+    )
+    frames = source.frames()
+    next(frames)
+    now[0] += 0.85  # OBS took far longer than the 0.1s interval
+    next(frames)
+
+    assert sleeps == []
