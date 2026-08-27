@@ -21,6 +21,7 @@ from fgc_detector.detectors.tokon import (
     P2_PIP_CENTRES,
     TokonPipDetector,
     _background,
+    _badge,
     _core,
     _icon,
 )
@@ -57,9 +58,15 @@ def _draw_empty(img: np.ndarray, cx: int) -> None:
 
 
 def _draw_lit(img: np.ndarray, cx: int) -> None:
-    """A lit slot: an opaque icon disc over the whole marker band."""
+    """A lit slot: an opaque icon disc plus the white P/V badge below it.
+
+    The badge is HUD chrome present on every real lit disc, and the detector
+    requires it as positive evidence -- a disc without one is exactly what a
+    character sprite covering an empty slot looks like.
+    """
     _paint(img, _icon(cx), ICON)
     _paint(img, _core(cx), ICON)
+    _paint(img, _badge(cx), NEAR_WHITE)
 
 
 def _board(p1_lit: int, p2_lit: int) -> np.ndarray:
@@ -89,7 +96,7 @@ def test_declares_canonical_size_and_supported_events() -> None:
 
 def test_rois_expose_every_slot_and_stay_inside_the_canonical_frame() -> None:
     rois = TokonPipDetector().rois()
-    assert len(rois) == 18  # six slots x (core, icon, background)
+    assert len(rois) == 24  # six slots x (core, icon, background, badge)
     for name, roi in rois.items():
         assert roi.x + roi.w <= CANONICAL_SIZE[0], name
         assert roi.y + roi.h <= CANONICAL_SIZE[1], name
@@ -176,3 +183,21 @@ def test_observe_is_pure() -> None:
     detector = TokonPipDetector()
     frame = _frame(_board(3, 1))
     assert detector.observe(frame).payload == detector.observe(frame).payload
+
+
+def test_a_badgeless_disc_is_not_read_as_lit() -> None:
+    """The sprite-occlusion hazard in its hardest form.
+
+    A character sprite covering an empty slot scrubs the pale circle and puts
+    opaque, strongly-contrasting colour over the icon band -- it satisfies both
+    of the *background-relative* tests on its own. What it has no reason to
+    reproduce is the white P/V badge, which is HUD chrome rather than character
+    art. Without it, this must stay ambiguous rather than complete a 3-0.
+    """
+    img = _board(2, 0)
+    outer = P1_PIP_CENTRES[0]
+    _paint(img, _core(outer), ICON)
+    _paint(img, _icon(outer), ICON)  # a convincing disc, but no badge
+    observation = TokonPipDetector().observe(_frame(img))
+    assert observation.screen is Screen.UNKNOWN
+    assert observation.winner is None
