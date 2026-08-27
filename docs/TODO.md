@@ -22,6 +22,52 @@ footage across in-match vs wipe frames (never guessed); the committed corpus
 measure from. Also revisit once real character-select footage exists (that branch
 was omitted for lack of any char-select screen in the calibration clip).
 
+## TOKON: verify the ROIs against a native 1920x1080 capture (RESOLVED, 2026-08-27)
+
+Done. Verified against `~/repos/tokon/tokon-3.mp4` (native 1920x1080, bt709 SDR, recorded through
+OBS). **The ROIs were correct**: the empty pip's pale disc measures centre (747.5, 48.5) against the
+assumed (747, 48), and the 38px pitch matches exactly — the 1280x714 calibration source introduced
+no measurable offset.
+
+The native capture did expose a different defect in the same detector: the lit-pip test was blind on
+full-resolution footage. Fixed and re-measured in
+`docs/superpowers/reports/2026-08-27-tokon-recalibration.md`, and `samples/tokon/` now carries 27
+native frames (`scripts/build_tokon_native_corpus.py`) so the corpus spans two unrelated captures.
+
+## ObsFrameSource achieves less than the configured poll_hz (RESOLVED, 2026-08-27)
+
+Fixed. Two compounding causes, both found only after measuring against a source that was actually
+decoding — an earlier 6.16 Hz measurement was taken against a static black frame and was worthless.
+The real live figure was **0.95 Hz** at `poll_hz = 10.0`, which made every TOKON match end
+undetectable (3 agreeing frames need 2.10s; the longest win window is 1.20s).
+
+1. Screenshots were requested as **PNG**. Lossless compression of a noisy game frame is expensive
+   inside OBS and dominates while OBS is also decoding: 1128ms vs JPEG q=80's 104ms at 1280x720.
+   Now JPEG q=80, validated against every committed corpus. `capture` still uses PNG — ROIs are
+   measured from those frames.
+2. `frames()` slept a full `1/poll_hz` **after** each capture, making the period
+   `capture_latency + 1/poll_hz`. Now sleeps only the unused remainder of the interval.
+
+Result: 0.95 Hz -> 8.64 Hz. The source now logs its achieved rate after 20 captures and warns below
+half the configured `poll_hz`, so a shortfall is visible instead of silent.
+
+## replay ignores config.toml (open, 2026-08-27)
+
+`_cmd_replay` builds `make_confirmer(game, ConfirmerConfig())` (`cli.py:80`), so `replay` always runs
+the *default* `agreement_frames=3` regardless of what `config.toml` says. An operator whose live
+config sets a different value gets a green replay and a silent live failure — which is exactly how
+the 2026-08-27 TOKON bug presented. Either take `--config`, or print the confirmer settings replay
+is actually using.
+
+## MarkerRoundDetector has no users (open, 2026-08-26)
+
+`detectors/marker.py` (`MarkerLayout` + `MarkerRoundDetector`, brightness `fill_ratio`) is
+registered for **zero** games, while `avatar.py`, `sf6.py` and `tokon.py` each hand-roll their own
+pip/marker loop. Now that pip counting is the documented default (CLAUDE.md, "How to add a new
+game" step 3), the generic path should either grow to cover the real cases — parametrising the
+per-slot "is it lit?" test instead of hard-coding brightness — or be deleted so it stops looking
+like the route to take. Decide when a fourth pip game lands.
+
 ## Tekken 8 detector (deferred 2026-07-22)
 
 v1 shipped with SF6 only. Tekken 8 is deferred at the user's request.

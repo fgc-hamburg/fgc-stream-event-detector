@@ -82,7 +82,7 @@ Frame (image + captured_at)
 - **Confirmers hold all temporal logic** (N-frame agreement, arming, cooldown). Two exist, both
   exposing the same interface (`observe/arm/disarm/set_game/state/armed/game`):
   - `Confirmer` (`confirmer.py`) — the marker/pip path: fires when a side reaches its round count;
-    used by Avatar (and any `MarkerRoundDetector` game). This is the **default**.
+    used by Avatar and TOKON (and any `MarkerRoundDetector` game). This is the **default**.
   - `SetScoreConfirmer` (`set_score_confirmer.py`) — SF6's games-won counter: fires on a single-side
     +1 increment.
   - `make_confirmer(game, config)` in `confirmation.py` picks which. It is a small explicit map:
@@ -109,16 +109,27 @@ server are game-agnostic and you rarely touch them.
    labelled PNGs. **Never invent ROI coordinates or thresholds** — every constant is measured.
 2. **Add the enum value** in `src/fgc_detector/types.py`: `Game.X = "x"`. (Every closed-set value is
    an enum; no bare game strings anywhere else.)
-3. **Choose a detection strategy — the game's own way.** Options:
-   - Reuse `MarkerRoundDetector` (`detectors/marker.py`) if the game has **brightness**-distinct
-     round pips: contribute a `MarkerLayout` (data — ROIs, `rounds_to_win`, thresholds), no new
-     logic. Fires via the marker `Confirmer`.
-   - Write a **dedicated detector** (like `sf6.py`'s counter or `avatar.py`'s colour pips) if the HUD
-     doesn't fit that shape. Implement the `Detector` protocol: attributes `game`, `canonical_size =
-     (1920, 1080)`; methods `observe(frame) -> Observation`, `rois() -> dict[str, Roi]`,
-     `supported_events() -> frozenset[EventType]`. Keep it pure. Reuse `roi.py` primitives
-     (`fill_ratio` = brightness, `color_fill_ratio` = hue/sat/val, `match_template` = glyph) or add a
-     new *general* primitive there.
+3. **Choose a detection strategy. Counting round-win pips is the default; SF6 is the exception.**
+   Nearly every fighting game draws a fixed row of round markers per side, so start by assuming
+   that shape: measure the marker ROIs, contribute a per-frame "is this marker lit?" test, and let
+   the shared marker `Confirmer` (reach-N → win) do all the temporal work. Only reach for a
+   different shape when the HUD genuinely has no pip row — SF6 is the one such game so far (it
+   shows a games-won-in-set digit, which is why it has its own digit reader *and* its own
+   `SetScoreConfirmer`). In pip order of preference:
+   - Reuse `MarkerRoundDetector` (`detectors/marker.py`) if the pips are **brightness**-distinct:
+     contribute a `MarkerLayout` (data — ROIs, `rounds_to_win`, thresholds), no new logic.
+   - Write a **dedicated pip detector** (like `avatar.py`'s colour pips or `tokon.py`'s character
+     icons) if the pips are distinguished some other way. It still reports pip counts to the same
+     marker `Confirmer` — only the "is it lit?" test is new.
+   - Write a **non-pip detector** (like `sf6.py`'s counter) only if there is no pip row at all;
+     this also means picking/adding a confirmer strategy in step 5.
+
+   Either way, implement the `Detector` protocol: attributes `game`, `canonical_size =
+   (1920, 1080)`; methods `observe(frame) -> Observation`, `rois() -> dict[str, Roi]`,
+   `supported_events() -> frozenset[EventType]`. Keep it pure. Reuse `roi.py` primitives
+   (`fill_ratio` = brightness, `color_fill_ratio` = hue/sat/val, `match_template` = glyph,
+   `pale_fill_ratio` = bright-and-colourless, `region_difference` = one region vs another, which is
+   how you read a marker whose own colour varies) or add a new *general* primitive there.
 4. **Calibrate from the footage** (the real work — its own task):
    - Extract frames, `normalize()` to 1920×1080, and **measure** ROIs by diffing known states; set
      thresholds to sit in a **clean gap** between states (dump HSV/greyscale numbers, don't eyeball).
@@ -129,17 +140,19 @@ server are game-agnostic and you rarely touch them.
      pass a test.
    - Write a calibration report `docs/superpowers/reports/YYYY-MM-DD-<game>-calibration.md` with the
      measured constants (copy-paste block), the margins, and the ground-truth `(second, winner)` list.
-5. **Wire the confirmer** in `confirmation.py::make_confirmer` — usually nothing to do (non-SF6 →
-   marker `Confirmer`). Only add a branch if the game needs a counter-style strategy.
+5. **Wire the confirmer** in `confirmation.py::make_confirmer` — for a pip game there is nothing to
+   do (non-SF6 → marker `Confirmer`, by default). Only add a branch if the game genuinely has no
+   pip row and needs a counter-style strategy.
 6. **Register**: `register(<Detector>())` at the bottom of the module, and add `from . import <game>`
    to `detectors/__init__.py`.
 7. **Roster**: add `"x"` to `enabled_games` in `config.example.toml`, and update the assertion in
    `tests/test_config.py::test_example_config_loads_cleanly_with_documented_defaults`.
 8. **Tests** (hermetic, falsifiable):
    - detector unit tests on synthetic frames (paint the measured ROIs) — assert each screen/winner;
-   - corpus regression over `samples/<game>/*.png` (model on `test_avatar_corpus.py` /
-     `test_sf6_counter.py`) — assert real ground truth; use a strict `xfail` (with a written reason)
-     for a genuine corpus-label conflict rather than weakening an assertion;
+   - corpus regression over `samples/<game>/*.png` (model on `test_tokon_corpus.py` /
+     `test_avatar_corpus.py` / `test_sf6_counter.py`) — assert real ground truth; use a strict
+     `xfail` (with a written reason) for a genuine corpus-label conflict rather than weakening an
+     assertion;
    - a confirmer-integration test: feed a synthetic observation sequence and assert exactly one
      correct event fires.
 9. **Validate end-to-end**: `uv run fgc-detect replay --game x --video <clip>` produces the right
@@ -176,9 +189,25 @@ server are game-agnostic and you rarely touch them.
   active game's strategy changes.
 - **OBS capture resolution ≠ calibration resolution** → misaligned ROIs. Always run the `capture` +
   `roi` check (above) against the real capture before trusting live detection.
-- **Character-select is optional.** Avatar omits it (no such screen in its footage); the marker
-  confirmer's 0-0 fresh-match path covers cooldown release. Only add a `CHAR_SELECT` branch if you
-  have footage to calibrate its ROI.
+- **Character-select is optional.** Avatar and TOKON both omit it (no such screen in their
+  footage); the marker confirmer's 0-0 fresh-match path covers cooldown release. Only add a
+  `CHAR_SELECT` branch if you have footage to calibrate its ROI.
+- **A "the empty marker is gone" test fails open.** If you read a pip by the *absence* of its empty
+  state, anything that covers an empty slot (a sprite, a flash, the HUD vanishing) reads as lit —
+  and enough of those name a false winner. Require **positive evidence of the lit marker** as well,
+  and resolve anything that is neither to `UNKNOWN`. See `tokon.py` and its calibration report.
+- **Measure the live capture rate against a source that is actually decoding.** A screenshot of an
+  idle or paused OBS source is an order of magnitude cheaper than one of a source mid-playback, so
+  a rate measured on a static frame is worthless. The historical trap: requesting **PNG** cost
+  1128ms/frame at 1280x720 against JPEG q=80's 104ms, because lossless compression of a noisy game
+  frame is expensive *inside OBS*. That was the difference between ~1Hz and ~9Hz — and below ~2Hz
+  no brief match-end marker can ever accumulate `agreement_frames`. `ObsFrameSource` now requests
+  JPEG and logs the rate it achieves; `capture` still requests PNG because ROIs are *measured* from
+  those frames. If you change the capture format, re-validate it by re-encoding every committed
+  corpus frame and re-running its detector.
+- **The winning marker may only be on screen for ~1 second.** TOKON hides the HUD for the KO
+  cinematic and brings it back with the final pip lit for 0.8–1.4 s. Measure that window during
+  calibration: it sets the floor on `obs.poll_hz` for that game.
 - **Dark-screen HUD gates** can misread all-dark transition frames as in-match (see Avatar's TODO
   note) — harmless (reads 0-0, fires nothing) but worth a variance/digit-presence check if it bites.
 

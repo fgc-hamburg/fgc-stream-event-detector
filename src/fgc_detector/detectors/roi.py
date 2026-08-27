@@ -104,3 +104,80 @@ def color_fill_ratio(
         hue_mask = (hue >= hue_lo) | (hue <= hue_hi)
     mask = hue_mask & (sat >= sat_min) & (val >= val_min)
     return float(np.count_nonzero(mask) / mask.size)
+
+
+def pale_fill_ratio(
+    image: np.ndarray,
+    roi: Roi,
+    *,
+    sat_max: int,
+    val_min: int,
+) -> float:
+    """Fraction of the ROI's pixels that are pale: bright and near-colourless.
+
+    A pixel counts when its HSV saturation <= ``sat_max`` AND its value >=
+    ``val_min``. This is the reading ``color_fill_ratio`` structurally cannot
+    make: that function requires saturation *above* a floor, so it can find a
+    vivid marker but never a white one.
+
+    Written for markers whose signal is their *absence* of colour -- a white
+    dot, circle, or outline that some other state replaces. Degrades to 0.0 on
+    an out-of-frame ROI, like every primitive here.
+    """
+    patch = roi.crop(image)
+    if patch.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+    mask = (hsv[:, :, 1] <= sat_max) & (hsv[:, :, 2] >= val_min)
+    return float(np.count_nonzero(mask) / mask.size)
+
+
+def region_deviation_fraction(
+    image: np.ndarray,
+    a: Roi,
+    b: Roi,
+    *,
+    threshold: int = 30,
+) -> float:
+    """Fraction of `a`'s pixels that differ from `b`'s mean colour by `threshold`.
+
+    Where ``region_difference`` compares two region *means*, this compares each
+    of `a`'s pixels against `b`'s mean and reports how much of `a` stands out.
+    The distinction matters when `a` is mostly background with a small mark on
+    it: averaging dilutes the mark until it vanishes, while counting the pixels
+    it covers does not. Use it to ask "how much of this region is covered by
+    something that is not its surroundings?"
+
+    Like every primitive here it is background-*relative* -- a stage or overlay
+    tinting both regions equally cancels out -- and degrades to 0.0 when either
+    ROI falls outside the frame.
+    """
+    patch_a = a.crop(image)
+    patch_b = b.crop(image)
+    if patch_a.size == 0 or patch_b.size == 0:
+        return 0.0
+    mean_b = patch_b.reshape(-1, patch_b.shape[-1]).mean(axis=0)
+    deviation = np.abs(patch_a.reshape(-1, patch_a.shape[-1]) - mean_b).mean(axis=1)
+    return float(np.count_nonzero(deviation > threshold) / deviation.size)
+
+
+def region_difference(image: np.ndarray, a: Roi, b: Roi) -> float:
+    """How different two regions look, as 0.0 (identical) to 1.0 (black vs white).
+
+    Compares the mean BGR colour of each region and returns the mean absolute
+    channel difference, normalized by 255. The two ROIs need not be the same
+    size or adjacent.
+
+    This is the background-*independent* primitive: a stage or overlay that
+    tints both regions equally cancels out, where any absolute threshold would
+    be fooled. Use it to ask "does this spot differ from its own surroundings?"
+    -- e.g. is a marker drawn here, or is this just the stage showing through?
+    Degrades to 0.0 when either ROI falls outside the frame.
+    """
+    patch_a = a.crop(image)
+    patch_b = b.crop(image)
+    if patch_a.size == 0 or patch_b.size == 0:
+        return 0.0
+    mean_a = patch_a.reshape(-1, patch_a.shape[-1]).mean(axis=0)
+    mean_b = patch_b.reshape(-1, patch_b.shape[-1]).mean(axis=0)
+    return float(np.abs(mean_a - mean_b).mean() / 255.0)

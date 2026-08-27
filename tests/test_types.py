@@ -64,3 +64,9 @@ def test_avatar_is_a_game() -> None:
     from fgc_detector.types import Game
     assert Game("avatar") is Game.AVATAR
     assert Game.AVATAR.value == "avatar"
+
+
+def test_tokon_is_a_game() -> None:
+    """TOKON round-trips through the wire value, like every other game."""
+    assert Game("tokon") is Game.TOKON
+    assert Game.TOKON.value == "tokon"
