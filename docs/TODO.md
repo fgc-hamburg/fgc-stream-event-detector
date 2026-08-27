@@ -22,22 +22,37 @@ footage across in-match vs wipe frames (never guessed); the committed corpus
 measure from. Also revisit once real character-select footage exists (that branch
 was omitted for lack of any char-select screen in the calibration clip).
 
-## TOKON: verify the ROIs against a native 1920x1080 capture (open, 2026-08-26)
+## TOKON: verify the ROIs against a native 1920x1080 capture (RESOLVED, 2026-08-27)
 
-`TokonPipDetector` was calibrated entirely from `~/repos/tokon/TOKON.mp4`, a **1280x714** capture
-that `normalize()` upscales to 1920x1080 (aspect 1.7927 vs 1.7778 — inside the 2% tolerance, so
-~0.8% of vertical squash is baked into every measured coordinate). The ROIs are 6-24px boxes, so a
-small systematic offset matters. Before trusting live detection:
+Done. Verified against `~/repos/tokon/tokon-3.mp4` (native 1920x1080, bt709 SDR, recorded through
+OBS). **The ROIs were correct**: the empty pip's pale disc measures centre (747.5, 48.5) against the
+assumed (747, 48), and the 38px pitch matches exactly — the 1280x714 calibration source introduced
+no measurable offset.
 
-```bash
-uv run fgc-detect capture --config config.toml --out obs_frames --limit 30
-uv run fgc-detect roi --game tokon --sample obs_frames/frame_00000.png --out roi_check.png
-```
+The native capture did expose a different defect in the same detector: the lit-pip test was blind on
+full-resolution footage. Fixed and re-measured in
+`docs/superpowers/reports/2026-08-27-tokon-recalibration.md`, and `samples/tokon/` now carries 27
+native frames (`scripts/build_tokon_native_corpus.py`) so the corpus spans two unrelated captures.
 
-The 18 boxes must sit on the six pip slots (core inside the white circle, icon over the disc,
-background on bare stage above it). If they are off, re-measure against the 1080p frames and add
-them to `samples/tokon/`. See section 8 of
-`docs/superpowers/reports/2026-08-26-tokon-calibration.md`.
+## ObsFrameSource achieves less than the configured poll_hz (open, 2026-08-27)
+
+`ObsFrameSource.frames()` sleeps a full `1/poll_hz` *after* each capture returns, so the achieved
+period is `capture_latency + 1/poll_hz`, never `1/poll_hz`. Measured against a live OBS: 6.16 Hz
+achieved at `poll_hz = 10.0` (50ms capture latency at 1280x720; 1.7s at 1920x1080, so request size
+matters a lot). `poll_hz` therefore does not mean what `config.example.toml` says it means, and the
+shortfall is invisible to the operator.
+
+This bites games whose winning marker is on screen only briefly — TOKON's shortest observed win window is
+0.58s, which yields 4.6 samples at 6.16Hz but 6.8 at a true 10Hz. Fix: pace against a deadline
+(sleep the *remainder* of the interval) and log the achieved rate at startup.
+
+## replay ignores config.toml (open, 2026-08-27)
+
+`_cmd_replay` builds `make_confirmer(game, ConfirmerConfig())` (`cli.py:80`), so `replay` always runs
+the *default* `agreement_frames=3` regardless of what `config.toml` says. An operator whose live
+config sets a different value gets a green replay and a silent live failure — which is exactly how
+the 2026-08-27 TOKON bug presented. Either take `--config`, or print the confirmer settings replay
+is actually using.
 
 ## MarkerRoundDetector has no users (open, 2026-08-26)
 
